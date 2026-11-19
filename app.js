@@ -537,8 +537,45 @@ function drawHistory(g) {
   });
 }
 
+/* ---------------- 使い方マニュアル ---------------- */
+const MANUAL_HTML = `
+  <h2 style="margin-top:0">📖 使い方マニュアル</h2>
+  <h3>⚽ 初めて使う人向け・基本ステップ</h3>
+  <ol>
+    <li><b>くじ種を選択</b>：上部タブで toto / mini toto / totoGOAL3 / totoGOAL2 を切替</li>
+    <li><b>AI勝敗予測を確認</b>：「🎯 勝敗予想」で各試合の 1/0/2 確率・AI本命・波乱アラートを確認</li>
+    <li><b>買い目を作る</b>：「📝 買い目＆マークシート」で予算を入力し「🎯 買い目を最適化」</li>
+    <li><b>マークシートを保存</b>：表示されたシートを保存・印刷して購入に利用</li>
+  </ol>
+  <h3>🧠 マイAI育成・カスタム学習</h3>
+  <ul>
+    <li>データは<b>あなたのブラウザ（localStorage）にのみ保存</b>。他の閲覧者やMac本体に影響しません</li>
+    <li><b>チーム別補正</b>：チームを開き「勝ち/引き分け/負け」へ±pt設定→「💾 保存」でAI勝率へリアルタイム上乗せ</li>
+    <li><b>条件別学習・メモ</b>：雨天・ケガ人・監督交代などをメモ登録</li>
+    <li><b>答え合わせ学習</b>：自分の予想を記録→結果確定で的中判定。的中率（上限100%）・回収率（100%=プラマイゼロ）・AIレベルが育つ</li>
+    <li><b>推しクラブ</b>：登録すると応援チームの試合に「冷静アドバイス」が出ます</li>
+  </ul>
+  <h3>🔢 「1・0・2」とマルチ買いの見方</h3>
+  <ul>
+    <li><b>1</b>＝ホーム勝ち／<b>0</b>＝引き分け／<b>2</b>＝アウェイ勝ち</li>
+    <li><b>シングル</b>＝1通り／<b>ダブル</b>＝2通り／<b>トリプル</b>＝3通り</li>
+    <li>接戦度が高い試合ほど自動でダブル・トリプルが配置されます</li>
+    <li>「📱 1試合ずつマーク確認モード」で1試合ずつ大きく確認してから反映できます</li>
+  </ul>
+  <h3>⚠️ 注意事項</h3>
+  <p>本システムの予想は統計・AI分析に基づく<b>参考情報</b>です。的中を保証するものではなく、
+  最終的な購入判断とその結果についてはご自身の責任で行ってください。</p>`;
+function showManual() {
+  $("#manual-body").innerHTML = MANUAL_HTML;
+  $("#manual-overlay").style.display = "block";
+}
+function hideManual() { $("#manual-overlay").style.display = "none"; }
+
 /* ---------------- 起動 ---------------- */
 async function boot() {
+  $("#btn-manual").onclick = showManual;
+  $("#manual-close").onclick = hideManual;
+  $("#manual-overlay").onclick = (e) => { if (e.target.id === "manual-overlay") hideManual(); };
   try {
     const b = await (await fetch("build.json", { cache: "no-store" })).json();
     BUILD_TS = b.ts;
