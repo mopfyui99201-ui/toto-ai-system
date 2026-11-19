@@ -1,0 +1,14 @@
+{
+  "name": "toto勝敗予想システム",
+  "short_name": "toto予想",
+  "description": "toto／mini toto／totoGOAL3／totoGOAL2 のAI勝敗・得点予想（閲覧専用）",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f6f8fb",
+  "theme_color": "#16324f",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

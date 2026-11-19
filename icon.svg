@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#16324f"/>
+  <circle cx="256" cy="256" r="150" fill="#fff"/>
+  <path d="M256 150l28 58 64 9-46 45 11 64-57-30-57 30 11-64-46-45 64-9z" fill="#2f6fed"/>
+  <text x="256" y="330" font-size="72" text-anchor="middle" fill="#16324f" font-family="sans-serif" font-weight="bold">toto</text>
+</svg>
