@@ -23,7 +23,7 @@ let PROFILE = null;       // マイAIプロフィール
 /* ---------------- マイAIプロフィール（localStorage） ---------------- */
 function defaultProfile() {
   return { enabled: true, draw_bias: 0, team_adj: {}, conditions: [],
-           notes: [], entries: [], stakes: {} };
+           notes: [], entries: [], stakes: {}, favorites: [] };
 }
 function loadProfile() {
   try {
@@ -65,6 +65,26 @@ function applyCorrections(rows) {
     for (const o of OUTCOMES) b.gaps[o] = Math.round((p[o] - votes[o]) * 10) / 10;
     return b;
   });
+}
+
+/* ---------------- 推しクラブへの冷静アドバイス ---------------- */
+function favoriteAdvice(a) {
+  const favs = PROFILE.favorites || [];
+  const out = [];
+  for (const [team, isHome] of [[a.home, true], [a.away, false]]) {
+    if (!favs.includes(team)) continue;
+    const pWin = isHome ? a.p1 : a.p2;
+    const vWin = isHome ? (a.vote_1 || 0) : (a.vote_2 || 0);
+    const venue = isHome ? "ホーム" : "アウェイ";
+    let txt;
+    if (pWin >= vWin + 10) txt = `【${team}】AI勝率${pWin}%は投票率${vWin}%を上回り、客観的には${venue}有利と評価。ただし応援目線を排して判断を。`;
+    else if (pWin <= vWin - 10) txt = `【${team}】世間の評価(${vWin}%)よりAI評価(${pWin}%)が低め。波乱・不安材料を確認して。`;
+    else txt = `【${team}】AI評価${pWin}%と投票率${vWin}%は拮抗。五分の予想。`;
+    if ((a.p0 || 0) >= 28) txt += ` 引き分け確率${a.p0}%と高め→油断注意。`;
+    if (!isHome) txt += "（アウェイ戦）";
+    out.push(txt);
+  }
+  return out;
 }
 
 /* ---------------- 買い目最適化（optimizer.py の貪欲法をJS移植） ---------------- */
@@ -168,15 +188,23 @@ function renderWinDraw(g) {
 
   // 予想テーブル
   html += card(`<h3 style="margin-top:0">🎯 勝敗予想</h3><div style="overflow-x:auto"><table>
-    <tr><th>試合</th><th class="l">対戦カード</th><th>1 ホーム勝ち</th><th>0 引き分け</th><th>2 アウェイ勝ち</th><th>AI本命</th><th>引分危険度</th><th>波乱</th></tr>` +
+    <tr><th>試合</th><th class="l">対戦カード</th><th>1 ホーム勝ち</th><th>0 引き分け</th><th>2 アウェイ勝ち</th><th>AI本命</th><th>接戦度</th><th>引分危険度</th><th>波乱</th></tr>` +
     rows.map((a) => `<tr>
       <td>${a.match_no}</td>
       <td class="l">${esc(a.home)} vs ${esc(a.away)}<br><span class="muted">${esc(a.date)} ${esc(a.time)}</span></td>
       ${probCell(a.p1)}${probCell(a.p0)}${probCell(a.p2)}
       <td><b>${OUTCOME_LABEL[a.predicted]}</b></td>
+      <td>${(() => { const s = [a.p1, a.p0, a.p2].sort((x, y) => y - x); return `${Math.round((s[0] - s[1]) * 10) / 10}pt`; })()}</td>
       <td>${a.draw_risk ?? "-"}</td>
       <td>${a.upset ? `<span class="warn">⚡波乱狙い</span>` : ""}</td></tr>`).join("") +
     `</table></div>`);
+
+  // 推しクラブへの冷静アドバイス
+  const advices = rows.flatMap((a) => favoriteAdvice(a));
+  if (advices.length) {
+    html += card(`<h3 style="margin-top:0">⭐ 推しクラブへの冷静アドバイス</h3>` +
+      advices.map((t) => `<p style="margin:6px 0">💡 ${esc(t)}</p>`).join("") + "</div>");
+  }
 
   // ギャップ分析
   const maxP = Math.max(...rows.map((a) => Math.max(a.p1, a.p0, a.p2, a.vote_1 || 0, a.vote_0 || 0, a.vote_2 || 0)), 1);
@@ -233,6 +261,8 @@ function renderWinDraw(g) {
       `<p><b>${plan.lines}口・${plan.cost.toLocaleString()}円・全的中期待度 ${plan.coverage}%</b></p>
        <div style="overflow-x:auto"><table><tr><th>試合</th><th class="l">対戦カード</th><th>買い目</th><th>種類</th></tr>${marks}</table></div>
        <div id="msheet"></div>
+       <details style="margin-top:10px"><summary class="btn sub" style="display:inline-block;padding:8px 14px;border-radius:10px">📱 1試合ずつマーク確認モード</summary>
+         <div id="markcheck" style="margin-top:10px"></div></details>
        <p><button class="btn sub" id="btn-dl">⬇ マークシートを保存</button></p>`;
     $("#msheet").innerHTML = markSheetHTML(plan.marks, g.round_key || DATA.round_no);
     $("#btn-dl").onclick = () => {
@@ -241,6 +271,7 @@ function renderWinDraw(g) {
       a.href = URL.createObjectURL(blob); a.download = "toto_mark_sheet.html"; a.click();
       URL.revokeObjectURL(a.href);
     };
+    renderMarkCheck(plan.marks, g.round_key || DATA.round_no);
   };
 
   renderMyAiPanel(g);
@@ -279,6 +310,54 @@ function renderGoal(g) {
   $("#app").innerHTML = html;
 }
 
+/* ---------------- 1試合ずつマーク確認モード ---------------- */
+function renderMarkCheck(marks, roundLabel) {
+  const el = $("#markcheck");
+  if (!el) return;
+  let idx = 0;
+  const picks = marks.map((m) => new Set(m.outcomes));
+  const draw = () => {
+    const m = marks[idx];
+    el.innerHTML = `
+      <div class="row" style="justify-content:space-between;margin-bottom:8px">
+        <button class="btn sub" id="mc-prev" ${idx === 0 ? "disabled" : ""}>◀ 前へ</button>
+        <b>${idx + 1} / ${marks.length} 試合目</b>
+        <button class="btn sub" id="mc-next" ${idx === marks.length - 1 ? "disabled" : ""}>次へ ▶</button>
+      </div>
+      <div class="card" style="text-align:center">
+        <div class="muted">第${m.match_no}試合</div>
+        <div style="font-size:1.3rem;font-weight:800;margin:6px 0">${esc(m.home)}<br>vs ${esc(m.away)}</div>
+        <div class="muted">AI推奨：${m.outcomes.map((o) => `${o} ${OUTCOME_LABEL[o]}`).join("・")}（${m.type}）</div>
+        <div class="row" style="justify-content:center;margin-top:12px">
+          ${OUTCOMES.map((o) => `<button class="btn ${picks[idx].has(o) ? "" : "sub"}" data-o="${o}" style="font-size:1.1rem;padding:14px 10px;min-width:96px">${o}<br><small>${OUTCOME_LABEL[o]}</small></button>`).join("")}
+        </div>
+        <p class="muted">タップでON/OFF（複数選択可・最低1つは残ります）</p>
+      </div>
+      <div id="mc-done"></div>`;
+    $("#mc-prev").onclick = () => { if (idx > 0) { idx--; draw(); } };
+    $("#mc-next").onclick = () => { if (idx < marks.length - 1) { idx++; draw(); } };
+    el.querySelectorAll("[data-o]").forEach((b) => b.onclick = () => {
+      const o = b.dataset.o;
+      if (picks[idx].has(o)) { if (picks[idx].size > 1) picks[idx].delete(o); }
+      else picks[idx].add(o);
+      draw();
+    });
+    if (idx === marks.length - 1) {
+      $("#mc-done").innerHTML = `<p style="text-align:center"><button class="btn" id="mc-apply">✅ 確認完了・この内容でマークシートを再生成</button></p>`;
+      $("#mc-apply").onclick = () => {
+        const custom = marks.map((mm, i) => {
+          const sel = [...picks[i]].sort((a, b) => OUTCOMES.indexOf(a) - OUTCOMES.indexOf(b));
+          return { match_no: mm.match_no, home: mm.home, away: mm.away, outcomes: sel,
+                   type: { 1: "シングル", 2: "ダブル", 3: "トリプル" }[sel.length] || "シングル" };
+        });
+        $("#msheet").innerHTML = markSheetHTML(custom, roundLabel + "（マイマーク確認版）");
+        toast("確認済みマークシートを再生成しました");
+      };
+    }
+  };
+  draw();
+}
+
 /* ---------------- マイAI育成パネル ---------------- */
 function renderMyAiPanel(g) {
   const el = $("#myai-panel");
@@ -295,7 +374,10 @@ function renderMyAiPanel(g) {
     </div>
     <p class="muted">チーム別補正（-50〜+50pt）：「勝ち」=そのチームが勝つ方向、「負け」=相手が勝つ方向</p>
     <div id="team-adj"></div>
-    <h4>📝 戦術メモ・ケガ人メモ</h4>
+    <h4>⭐ 推しクラブ登録（冷静アドバイス用）</h4>
+    <details><summary class="muted">推しクラブを選択（${(p.favorites || []).length}件選択中）</summary>
+      <div class="in" id="fav-list" style="max-height:220px;overflow-y:auto"></div></details>
+    <h4>📝 戦術メモ・ケガ人・監督交代メモ</h4>
     <textarea id="myai-note" placeholder="例：川崎は主力DF出場停止の噂"></textarea>
     <p><button class="btn sub" id="myai-addnote">➕ メモ追加</button></p>
     <div id="myai-notes"></div>
@@ -326,6 +408,21 @@ function renderMyAiPanel(g) {
   $("#myai-en").onchange = (e) => { p.enabled = e.target.checked; saveProfile(); render(); };
   $("#myai-bias").onchange = (e) => { p.draw_bias = parseInt(e.target.value || "0", 10); saveProfile(); render(); };
   $("#myai-save").onclick = saveProfile;
+
+  // 推しクラブ（即時保存）
+  p.favorites = p.favorites || [];
+  const favList = $("#fav-list");
+  favList.innerHTML = teams.map((t) =>
+    `<label class="muted" style="display:block;padding:3px 0">
+      <input type="checkbox" data-fav="${esc(t)}" ${p.favorites.includes(t) ? "checked" : ""}> ${esc(t)}</label>`).join("");
+  favList.onchange = (e) => {
+    if (!e.target.dataset.fav) return;
+    const t = e.target.dataset.fav;
+    p.favorites = e.target.checked ? [...new Set([...p.favorites, t])] : p.favorites.filter((x) => x !== t);
+    saveProfile();
+    // アドバイスを即時反映するため再描画（スクロール位置は維持されないが許容）
+    render();
+  };
 
   // メモ
   const drawNotes = () => {
@@ -455,6 +552,9 @@ async function boot() {
     }
     $("#hdr-meta").textContent =
       `${DATA.round_no}／開催日 ${DATA.held_date}／取得 ${DATA.fetched_at}／公開データ生成 ${DATA.generated_at}`;
+    if (DATA.carryover) {
+      $("#hdr-meta").innerHTML += `<br><span style="color:#ffd166;font-weight:700">🔥 キャリーオーバー発生中！ ${esc(DATA.carryover)}</span>`;
+    }
     const want = new URLSearchParams(location.hash.slice(1)).get("g") || Object.keys(DATA.games)[0];
     CUR_GAME = DATA.games[want] ? want : Object.keys(DATA.games)[0];
     renderTabs();
