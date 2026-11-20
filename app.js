@@ -46,10 +46,171 @@ let BUILD_TS = "";
 let CUR_GAME = null;      // 選択中のくじ種キー
 let PROFILE = null;       // マイAIプロフィール
 
+/* ---------------- 🤖 自動収集（結果・ニュース・怪我情報） ----------------
+ * localStorage キー: toto_auto_v1。30分以上経過で起動時に裏側取得。
+ */
+const AUTO_KEY = "toto_auto_v1";
+const AUTO_INTERVAL = 30 * 60 * 1000;
+const RESULT_LIST_URL = "https://store.toto-dream.com/dcs/subos/screen/pi04/spin011/PGSPIN01101InitLotResultLsttoto.form";
+const RESULT_DETAIL_URL = "https://store.toto-dream.com/dcs/subos/screen/pi04/spin011/PGSPIN01101LnkHoldCntLotResultLsttoto.form";
+const NEWS_URLS = [
+  "https://www.jleague.jp/news/",
+  "https://www.toto-dream.com/toto/",
+];
+const AUTO_RE = /第\s*(\d+)\s*回/;
+const HOLD_RE = /holdCntId=(\d+)/;
+const SCORE_RE = /(\d+)\s*-\s*(\d+)/;
+
+let AUTO = { enabled: true, lastRun: 0, status: "未取得", results: {}, news: [] };
+try {
+  const raw = localStorage.getItem(AUTO_KEY);
+  if (raw) AUTO = { ...AUTO, ...JSON.parse(raw) };
+} catch (e) { /* 初期値のまま */ }
+function saveAuto() { localStorage.setItem(AUTO_KEY, JSON.stringify(AUTO)); }
+
+function _doc(html) { return new DOMParser().parseFromString(html, "text/html"); }
+function _text(el) { return (el.textContent || "").replace(/\s+/g, " ").trim(); }
+
+function listCompletedRounds(html) {
+  const doc = _doc(html), out = [];
+  doc.querySelectorAll("a[href]").forEach((a) => {
+    const m = HOLD_RE.exec(a.getAttribute("href") || "");
+    if (!m) return;
+    const label = _text(a);
+    const rm = AUTO_RE.exec(label);
+    out.push({ label, round_no: rm ? `第${rm[1]}回` : label, hold_cnt_id: m[1],
+               url: `${RESULT_DETAIL_URL}?holdCntId=${m[1]}` });
+  });
+  return out;
+}
+
+function parseResultHtml(html) {
+  const doc = _doc(html);
+  const rm = AUTO_RE.exec(_text(doc.body));
+  const round_no = rm ? `第${rm[1]}回` : "";
+  const matches = [];
+  doc.querySelectorAll("table").forEach((table) => {
+    const head = _text(table);
+    if (!head.includes("試合結果") || !head.includes("くじ結果")) return;
+    table.querySelectorAll("tr").forEach((tr) => {
+      const cells = [...tr.querySelectorAll("td,th")].map(_text);
+      if (cells.length < 7 || !/^\d+$/.test(cells[2])) return;
+      const sm = SCORE_RE.exec(cells[4]);
+      matches.push({ match_no: parseInt(cells[2], 10), date: cells[0], stadium: cells[1],
+        home: cells[3], away: cells[5], score: cells[4],
+        home_goals: sm ? +sm[1] : null, away_goals: sm ? +sm[2] : null,
+        result: ["1", "0", "2"].includes(cells[6]) ? cells[6] : "" });
+    });
+  });
+  return { round_no, matches };
+}
+
+async function fetchNewsItems() {
+  const items = [];
+  for (const url of NEWS_URLS) {
+    try {
+      const html = await fetchExternal(url);
+      const doc = _doc(html);
+      doc.querySelectorAll("a[href]").forEach((a) => {
+        const t = _text(a);
+        if (t.length < 8 || t.length > 90) return;
+        if (!/怪我|負傷|出場停止|監督|戦術|ニュース|J1|J2|試合|移籍|契約/.test(t)) return;
+        const href = a.getAttribute("href") || "";
+        if (!href || href.startsWith("#") || href.startsWith("javascript")) return;
+        const abs = href.startsWith("http") ? href : new URL(href, url).href;
+        if (!items.some((i) => i.title === t)) items.push({ title: t, url: abs });
+      });
+      if (items.length >= 8) break;
+    } catch (e) { /* 個別失敗は無視 */ }
+  }
+  return items.slice(0, 8);
+}
+
+async function autoCollect() {
+  AUTO.status = "取得中…"; updateAutobar();
+  try {
+    const listHtml = await fetchExternal(RESULT_LIST_URL);
+    const rounds = listCompletedRounds(listHtml);
+    if (!rounds.length) throw new Error("結果一覧を解析できませんでした");
+    const target = rounds[0];
+    const detailHtml = await fetchExternal(target.url);
+    const parsed = parseResultHtml(detailHtml);
+    const filled = parsed.matches.filter((m) => m.result);
+    if (!filled.length) throw new Error("試合結果を解析できませんでした");
+    const rkey = parsed.round_no || target.round_no;
+    AUTO.results[rkey] = {};
+    filled.forEach((m) => {
+      AUTO.results[rkey][m.match_no] = { result: m.result, home: m.home, away: m.away };
+    });
+    AUTO.news = await fetchNewsItems();
+    AUTO.lastRun = Date.now();
+    AUTO.status = `取得完了：${rkey} ${filled.length}試合`;
+  } catch (e) {
+    AUTO.lastRun = Date.now();
+    AUTO.status = `失敗：${e.message}`;
+  }
+  saveAuto(); updateAutobar();
+  if (DATA) render();  // 結果反映のため再描画
+}
+
+function _roundNum(key) {
+  const m = AUTO_RE.exec(String(key || ""));
+  return m ? `第${m[1]}回` : "";
+}
+function _normTeam(s) {
+  return String(s || "").replace(/[Ｆｆ][ＣＣ]|FC/gi, "").replace(/[\s・\-ー]/g, "");
+}
+function _teamMatch(a, b) {
+  const na = _normTeam(a), nb = _normTeam(b);
+  return na && nb && (na.includes(nb) || nb.includes(na));
+}
+/* 自動取得結果＋手動入力を data.json の結果へマージして返す */
+function resolveResults(rkey, rows) {
+  const out = {};
+  for (const gm of Object.values(DATA.games || {})) {
+    if ((gm.round_key || DATA.round_no) === rkey && gm.results) {
+      for (const [k, v] of Object.entries(gm.results)) out[k] = v;
+    }
+  }
+  const rnum = _roundNum(rkey);
+  const auto = rnum && AUTO.results[rnum];
+  if (auto) {
+    (rows || []).forEach((m) => {
+      const hit = auto[m.match_no];
+      // チーム名が一致する場合のみ採用（別カード誤爆防止）
+      if (hit && _teamMatch(hit.home, m.home) && _teamMatch(hit.away, m.away)) {
+        out[m.match_no] = hit.result;
+      }
+    });
+  }
+  const manual = (PROFILE.manual_results || {})[rkey] || {};
+  for (const [k, v] of Object.entries(manual)) if (v) out[k] = v;
+  return out;
+}
+
+function updateAutobar() {
+  const el = $("#autobar");
+  if (!el) return;
+  const last = AUTO.lastRun
+    ? new Date(AUTO.lastRun).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })
+    : "—";
+  el.innerHTML =
+    `<button class="btn sub" id="auto-toggle" style="padding:6px 12px;font-size:.78rem">
+       🤖 自動収集：${AUTO.enabled ? "ON" : "OFF"}</button>
+     <span class="st">${esc(AUTO.status)}／最終更新：${last}</span>
+     <button class="btn sub" id="auto-now" style="padding:6px 12px;font-size:.78rem">🔄 今すぐ収集</button>` +
+    (AUTO.news && AUTO.news.length
+      ? `<details><summary>📰 自動収集ニュース・怪我情報（${AUTO.news.length}件）</summary>` +
+        AUTO.news.map((n) => `<p style="margin:4px 0;font-size:.78rem"><a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(n.title)}</a></p>`).join("") +
+        `</details>` : "");
+  $("#auto-toggle").onclick = () => { AUTO.enabled = !AUTO.enabled; saveAuto(); updateAutobar(); };
+  $("#auto-now").onclick = () => autoCollect();
+}
+
 /* ---------------- マイAIプロフィール（localStorage） ---------------- */
 function defaultProfile() {
   return { enabled: true, draw_bias: 0, team_adj: {}, conditions: [],
-           notes: [], entries: [], stakes: {}, favorites: [] };
+           notes: [], entries: [], stakes: {}, favorites: [], manual_results: {} };
 }
 function loadProfile() {
   try {
@@ -522,11 +683,7 @@ function drawHistory(g) {
   const entries = PROFILE.entries || [];
   if (!entries.length) { el.innerHTML = `<p class="muted">まだ予想記録がありません。</p>`; return; }
 
-  // 全ゲームの結果マップ（round_key -> {match_no: actual}）
-  const resultsByKey = {};
-  for (const gm of Object.values(DATA.games)) {
-    if (gm.results) resultsByKey[gm.round_key || DATA.round_no] = gm.results;
-  }
+  // 結果マップ：data.json + 自動取得 + 手動入力をマージ（round_key -> {match_no: actual}）
   const byRound = {};
   entries.forEach((e) => (byRound[e.round_key] = byRound[e.round_key] || []).push(e));
 
@@ -535,7 +692,7 @@ function drawHistory(g) {
   let html = "";
   for (const rkey of Object.keys(byRound).sort()) {
     const es = byRound[rkey];
-    const results = resultsByKey[rkey] || {};
+    const results = resolveResults(rkey, es);
     const judged = es.filter((e) => results[e.match_no]);
     const hits = judged.filter((e) => e.pick === results[e.match_no]).length;
     judged.forEach((e) => { catStats[e.pick][1]++; catStats[e.pick][0] += e.pick === results[e.match_no] ? 1 : 0; });
@@ -555,8 +712,15 @@ function drawHistory(g) {
         <table><tr><th>試合</th><th>対戦</th><th>自分の予想</th><th>実際の結果</th><th>判定</th></tr>` +
       es.map((e) => {
         const a = results[e.match_no];
+        const man = ((PROFILE.manual_results || {})[rkey] || {})[e.match_no];
+        const resCell = a
+          ? OUTCOME_LABEL[a] || a
+          : `<select class="res-man" data-rk="${esc(rkey)}" data-no="${e.match_no}" style="width:110px">
+               <option value="">未確定（手動入力）</option>
+               ${OUTCOMES.map((o) => `<option value="${o}" ${man === o ? "selected" : ""}>${o}：${OUTCOME_LABEL[o]}</option>`).join("")}
+             </select>`;
         return `<tr><td>${e.match_no}</td><td class="l">${esc(e.home)} vs ${esc(e.away)}</td>
-          <td>${e.pick}</td><td>${a ? OUTCOME_LABEL[a] || a : "未確定"}</td>
+          <td>${e.pick}</td><td>${resCell}</td>
           <td>${a ? (e.pick === a ? "⭕" : "❌") : "—"}</td></tr>`;
       }).join("") + `</table></div></details>`;
   }
@@ -575,6 +739,15 @@ function drawHistory(g) {
     const pay = parseInt(document.querySelector(`.stake-pay[data-rk="${rk}"]`).value || "0", 10);
     PROFILE.stakes = PROFILE.stakes || {};
     PROFILE.stakes[rk] = { investment: inv, payout: pay };
+    saveProfile(); drawHistory(g);
+  });
+  // 自動取得できなかった試合の手動結果入力
+  document.querySelectorAll(".res-man").forEach((s) => s.onchange = () => {
+    const rk = s.dataset.rk, no = s.dataset.no;
+    PROFILE.manual_results = PROFILE.manual_results || {};
+    PROFILE.manual_results[rk] = PROFILE.manual_results[rk] || {};
+    if (s.value) PROFILE.manual_results[rk][no] = s.value;
+    else delete PROFILE.manual_results[rk][no];
     saveProfile(); drawHistory(g);
   });
 }
@@ -638,6 +811,11 @@ async function boot() {
     CUR_GAME = DATA.games[want] ? want : Object.keys(DATA.games)[0];
     renderTabs();
     render();
+    updateAutobar();
+    // 30分以上経過していれば裏側で自動収集（画面はブロックしない）
+    if (AUTO.enabled && (!AUTO.lastRun || Date.now() - AUTO.lastRun > AUTO_INTERVAL)) {
+      autoCollect();
+    }
   } catch (e) {
     $("#app").innerHTML = card(`<h3>⚠️ データを読み込めませんでした</h3>
       <p class="muted">${esc(e.message)}<br>公開データ（data.json）がまだ生成されていない可能性があります。</p>`);
