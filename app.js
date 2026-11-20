@@ -12,6 +12,32 @@ const GOAL_CATS = ["0", "1", "2", "3+"];
 const GOAL_LABEL = { "0": "0点", "1": "1点", "2": "2点", "3+": "3点以上" };
 
 const $ = (s) => document.querySelector(s);
+
+/* ---------------- 外部情報取得（CORSプロキシ） ----------------
+ * 第1候補: 専用Cloudflare Workerプロキシ。失敗時は無料プロキシ→直接取得の順。
+ */
+const DEDICATED_PROXY = "https://sparkling-firefly-4550.mopfyui99201.workers.dev?url=";
+const PROXY_CHAIN = [
+  (u) => DEDICATED_PROXY + encodeURIComponent(u),
+  (u) => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u),
+  (u) => "https://corsproxy.io/?url=" + encodeURIComponent(u),
+  (u) => "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(u),
+];
+async function fetchExternal(url, opts = {}) {
+  let lastErr = null;
+  for (const wrap of PROXY_CHAIN) {
+    try {
+      const r = await fetch(wrap(url), { ...opts, signal: AbortSignal.timeout(12000) });
+      if (r.ok) return await r.text();
+      lastErr = new Error(`HTTP ${r.status}`);
+    } catch (e) { lastErr = e; }
+  }
+  try {
+    const r = await fetch(url, { ...opts, signal: AbortSignal.timeout(12000) });
+    if (r.ok) return await r.text();
+    throw new Error(`HTTP ${r.status}`);
+  } catch (e) { throw lastErr || e; }
+}
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -245,9 +271,25 @@ function renderWinDraw(g) {
   const okSources = (DATA.sources || []).filter((s) => s.ok !== false);
   if (okSources.length) {
     html += card(`<h3 style="margin-top:0">🔗 情報元</h3>` +
-      okSources.map((s) => `<p style="margin:4px 0"><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.label)}</a></p>`).join(""));
+      okSources.map((s) => `<p style="margin:4px 0"><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.label)}</a></p>`).join("") +
+      `<p style="margin-top:8px"><button class="btn sub" id="btn-extcheck">📡 外部情報をプロキシ経由で確認</button>
+       <span id="extcheck-out" class="muted" style="margin-left:8px"></span></p>`);
   }
   $("#app").innerHTML = html;
+
+  const extBtn = $("#btn-extcheck");
+  if (extBtn) extBtn.onclick = async () => {
+    const out = $("#extcheck-out");
+    out.textContent = "取得中…（専用プロキシ優先）";
+    try {
+      const target = okSources[0].url;
+      const text = await fetchExternal(target);
+      const title = (text.match(/<title[^>]*>([^<]+)<\/title>/i) || [])[1] || "";
+      out.textContent = `✅ 取得成功（${text.length.toLocaleString()} bytes）${title ? "／" + title.trim().slice(0, 40) : ""}`;
+    } catch (e) {
+      out.textContent = `❌ 取得失敗: ${e.message}`;
+    }
+  };
 
   // 買い目最適化の配線
   $("#btn-opt").onclick = () => {
