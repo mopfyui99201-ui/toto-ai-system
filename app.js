@@ -114,6 +114,63 @@ function parseResultHtml(html) {
   return { round_no, matches };
 }
 
+/* 公式結果詳細HTMLから1〜3等の払戻金（100円あたり・円）を抽出（best-effort） */
+function parsePayoutsHtml(html) {
+  const text = _text(_doc(html).body);
+  const out = {};
+  for (const g of ["1等", "2等", "3等"]) {
+    const idx = text.indexOf(g);
+    if (idx < 0) continue;
+    const m = /([0-9][0-9,]{2,})\s*円/.exec(text.slice(idx, idx + 160));
+    if (m) out[g[0]] = parseInt(m[1].replace(/,/g, ""), 10);
+  }
+  return out;
+}
+
+/* 得点（ホーム・アウェイ）を totoGOAL のカテゴリ "H-A" へ変換 */
+function goalCatStr(n) {
+  if (n === null || n === undefined) return "";
+  return n === 0 ? "0" : n === 1 ? "1" : n === 2 ? "2" : "3+";
+}
+
+/* 公式の確定結果＋1〜3等配当金をプロキシ経由で取得し、
+ * 答え合わせ（AUTO.results）とトラッカー払戻（PROFILE.payouts）へ即時反映する */
+async function fetchResultsPayouts(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "取得中…"; }
+  try {
+    const listHtml = await fetchExternal(RESULT_LIST_URL);
+    const rounds = listCompletedRounds(listHtml);
+    if (!rounds.length) throw new Error("結果一覧を解析できませんでした");
+    const detailHtml = await fetchExternal(rounds[0].url);
+    const parsed = parseResultHtml(detailHtml);
+    const filled = parsed.matches.filter((m) => m.result);
+    if (!filled.length) throw new Error("試合結果を解析できませんでした");
+    const rnum = parsed.round_no || rounds[0].round_no;
+    AUTO.results[rnum] = AUTO.results[rnum] || {};
+    filled.forEach((m) => {
+      AUTO.results[rnum][m.match_no] = {
+        result: m.result, home: m.home, away: m.away,
+        goal: (m.home_goals !== null && m.away_goals !== null)
+          ? `${goalCatStr(m.home_goals)}-${goalCatStr(m.away_goals)}` : "",
+      };
+    });
+    const payouts = parsePayoutsHtml(detailHtml);
+    if (Object.keys(payouts).length) {
+      PROFILE.payouts = PROFILE.payouts || {};
+      PROFILE.payouts[rnum] = payouts;
+      saveProfile();
+    }
+    AUTO.lastRun = Date.now();
+    AUTO.status = `取得完了：${rnum} ${filled.length}試合${Object.keys(payouts).length ? "＋配当" : ""}`;
+    saveAuto(); updateAutobar();
+    toast(`確定結果を取得しました（${rnum}・${filled.length}試合${Object.keys(payouts).length ? "・配当金あり" : ""}）`);
+    if (DATA) render();
+  } catch (e) {
+    toast(`取得失敗：${e.message}`);
+    if (btn) { btn.disabled = false; btn.textContent = "🔄 確定結果・配当を取得"; }
+  }
+}
+
 async function fetchNewsItems() {
   const items = [];
   for (const url of NEWS_URLS) {
@@ -169,7 +226,11 @@ async function autoCollect() {
     const rkey = parsed.round_no || target.round_no;
     AUTO.results[rkey] = {};
     filled.forEach((m) => {
-      AUTO.results[rkey][m.match_no] = { result: m.result, home: m.home, away: m.away };
+      AUTO.results[rkey][m.match_no] = {
+        result: m.result, home: m.home, away: m.away,
+        goal: (m.home_goals !== null && m.away_goals !== null)
+          ? `${goalCatStr(m.home_goals)}-${goalCatStr(m.away_goals)}` : "",
+      };
     });
     AUTO.news = await fetchNewsItems();
     AUTO.lastRun = Date.now();
@@ -203,13 +264,18 @@ function resolveResults(rkey, rows) {
   }
   const rnum = _roundNum(rkey);
   const auto = rnum && AUTO.results[rnum];
-  // GOAL系の実結果は "H-A" カテゴリ形式。totoの1/0/2結果を誤って適用しない
-  if (auto && !isGoalKey(rkey)) {
+  if (auto) {
     (rows || []).forEach((m) => {
-      const hit = auto[m.match_no];
+      let hit = auto[m.match_no];
+      // GOAL系は試合番号がtoto本体と異なるため、番号で見つからなければチーム名一致で探す
+      if (!hit && isGoalKey(rkey)) {
+        hit = Object.values(auto).find((h) =>
+          _teamMatch(h.home, m.home) && _teamMatch(h.away, m.away));
+      }
+      const val = isGoalKey(rkey) ? (hit && hit.goal) : (hit && hit.result);
       // チーム名が一致する場合のみ採用（別カード誤爆防止）
-      if (hit && _teamMatch(hit.home, m.home) && _teamMatch(hit.away, m.away)) {
-        out[m.match_no] = hit.result;
+      if (val && _teamMatch(hit.home, m.home) && _teamMatch(hit.away, m.away)) {
+        out[m.match_no] = val;
       }
     });
   }
@@ -246,7 +312,8 @@ function updateAutobar() {
 /* ---------------- マイAIプロフィール（localStorage） ---------------- */
 function defaultProfile() {
   return { enabled: true, draw_bias: 0, team_adj: {}, conditions: [],
-           notes: [], entries: [], stakes: {}, favorites: [], manual_results: {} };
+           notes: [], entries: [], stakes: {}, favorites: [], manual_results: {},
+           payouts: {} };
 }
 function loadProfile() {
   try {
@@ -797,7 +864,8 @@ function renderMyAiPanel(g) {
     <div id="myai-notes"></div>
     <h4>🎯 この開催回の自分の予想記録（${isGoal ? "ホーム・アウェイ各チームの得点カテゴリ" : "1/0/2"}）</h4>
     <div id="myai-record"></div>
-    <h4>📈 過去の答え合わせ・育成レベル</h4>
+    <h4>📈 過去の答え合わせ・育成レベル
+      <button class="btn sub" id="btn-fetch-res" style="margin-left:10px;padding:4px 10px;font-size:.75rem">🔄 確定結果・配当を取得</button></h4>
     <div id="myai-history"></div>`;
 
   if (!isGoal) {
@@ -887,6 +955,9 @@ function renderMyAiPanel(g) {
     saveProfile(); toast("予想を記録しました");
   };
   $("#myai-record").appendChild(saveBtn);
+
+  const fr = $("#btn-fetch-res");
+  if (fr) fr.onclick = (e) => fetchResultsPayouts(e.currentTarget);
 
   drawHistory(g);
 }
@@ -1055,16 +1126,35 @@ function drawHistory(g) {
   // 💰 AI推奨買い目の通算収支トラッカー（公式配当連動・試算）
   const TR = DATA.tracker;
   if (TR && TR.rounds && TR.rounds.length) {
-    const tt = TR.totals || {};
-    el.innerHTML += `<h4>💰 AI推奨買い目の通算収支トラッカー（公式配当連動・試算）</h4>
-      <p class="muted">通算投資 <b>${(tt.investment || 0).toLocaleString()}円</b>／払戻 <b>${(tt.payout || 0).toLocaleString()}円</b>／
-      実回収率 <b>${tt.recovery ?? "—"}%</b>（${tt.rounds || 0}回分・各${(TR.budget || 1000).toLocaleString()}円買い続けた試算）</p>
+    // 端末で取得済みの公式配当（PROFILE.payouts）を最優先で上書き適用
+    const profPay = PROFILE.payouts || {};
+    const effRows = TR.rounds.map((r) => {
+      const rnum = _roundNum(r.round_no);
+      const pp = rnum && profPay[rnum];
+      if (pp && (pp["1"] || pp["2"] || pp["3"])) {
+        let grade = "", amt = 0;
+        if (r.expected_hits >= r.total) { grade = "1等"; amt = pp["1"] || 0; }
+        else if (r.expected_hits >= r.total - 1) { grade = "2等"; amt = pp["2"] || 0; }
+        else if (r.expected_hits >= r.total - 2) { grade = "3等"; amt = pp["3"] || 0; }
+        return { ...r, grade, payout: amt, has_payout: true };
+      }
+      return r;
+    });
+    const inv = effRows.reduce((s, r) => s + r.cost, 0);
+    const pay = effRows.reduce((s, r) => s + (r.payout || 0), 0);
+    const rec = inv ? Math.round(pay / inv * 1000) / 10 : null;
+    el.innerHTML += `<h4>💰 AI推奨買い目の通算収支トラッカー（公式配当連動・試算）
+      <button class="btn sub" id="btn-fetch-pay" style="margin-left:10px;padding:4px 10px;font-size:.75rem">🔄 確定結果・配当を取得</button></h4>
+      <p class="muted">通算投資 <b>${inv.toLocaleString()}円</b>／払戻 <b>${pay.toLocaleString()}円</b>／
+      実回収率 <b>${rec ?? "—"}%</b>（${effRows.length}回分・各${(TR.budget || 1000).toLocaleString()}円買い続けた試算）</p>
       <table><tr><th>開催回</th><th>投資</th><th>買い目</th><th>中を含む試合</th><th>期待的中</th><th>等級</th><th>払戻</th></tr>` +
-      TR.rounds.slice(-10).reverse().map((r) => `<tr><td>${esc(r.round_no)}</td>
+      effRows.slice(-10).reverse().map((r) => `<tr><td>${esc(r.round_no)}</td>
         <td>${r.cost.toLocaleString()}円</td><td>${r.lines}口</td>
         <td>${r.covered}/${r.total}</td><td>${r.expected_hits}</td>
         <td>${r.grade || "—"}</td><td>${r.has_payout ? r.payout.toLocaleString() + "円" : "配当未取得"}</td></tr>`).join("") +
-      `</table><p class="muted">各開催回のAI最適買い目を買い続けた場合の試算。配当金は公式1〜3等払戻を使用（未取得の回は0円計上）。</p>`;
+      `</table><p class="muted">各開催回のAI最適買い目を買い続けた場合の試算。配当金は公式1〜3等払戻を使用（未取得の回は0円計上）。「🔄 確定結果・配当を取得」で最新の公式配当を即時反映できます。</p>`;
+    const fb = $("#btn-fetch-pay");
+    if (fb) fb.onclick = (e) => fetchResultsPayouts(e.currentTarget);
   }
 
   document.querySelectorAll(".stake-save").forEach((b) => b.onclick = () => {
