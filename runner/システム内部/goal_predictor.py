@@ -8,14 +8,23 @@ from __future__ import annotations
 
 from scipy.stats import poisson
 
+import self_tuner
 from config import GOAL_CATEGORIES
 from predictor import expected_goals
 
 
-def team_goal_distribution(lam: float) -> dict[str, float]:
-    """1チームの0/1/2/3+得点確率（％）をポアソン分布で算出する。"""
+def team_goal_distribution(lam: float, side: str | None = None) -> dict[str, float]:
+    """1チームの0/1/2/3+得点確率（％）をポアソン分布で算出する。
+
+    side="home"/"away" を渡すと、答え合わせ履歴から学習したカテゴリ別
+    乗数（self_tuner）を確率へ自動反映してから再正規化する。
+    """
     raw = [poisson.pmf(k, lam) for k in range(3)]
     raw.append(max(0.0, 1.0 - sum(raw)))          # 3点以上は裾確率
+    if side:
+        coeffs = self_tuner.goal_coefficients().get(side, {})
+        if any(v != 1.0 for v in coeffs.values()):
+            raw = [p * float(coeffs.get(cat, 1.0)) for p, cat in zip(raw, GOAL_CATEGORIES, strict=True)]
     total = sum(raw) or 1.0
     return {cat: round(p / total * 100, 1) for cat, p in zip(GOAL_CATEGORIES, raw, strict=True)}
 
@@ -26,8 +35,8 @@ def analyze_goal_match(match: dict) -> dict:
     bias = float(match.get("h2h_bias", 0.0))  # 直接対決の過去傾向（推定）をλへ反映
     if bias:
         lam_h, lam_a = max(0.2, lam_h * (1 + bias)), max(0.2, lam_a * (1 - bias))
-    home_dist = team_goal_distribution(lam_h)
-    away_dist = team_goal_distribution(lam_a)
+    home_dist = team_goal_distribution(lam_h, side="home")
+    away_dist = team_goal_distribution(lam_a, side="away")
     home_pick = max(GOAL_CATEGORIES, key=lambda c: home_dist[c])
     away_pick = max(GOAL_CATEGORIES, key=lambda c: away_dist[c])
     return {

@@ -10,6 +10,13 @@ const OUTCOME_LABEL = { "1": "ホーム勝ち", "0": "引き分け", "2": "ア�
 const TICKET_UNIT = 100;
 const GOAL_CATS = ["0", "1", "2", "3+"];
 const GOAL_LABEL = { "0": "0点", "1": "1点", "2": "2点", "3+": "3点以上" };
+const GOAL_PICKS = [];
+GOAL_CATS.forEach((h) => GOAL_CATS.forEach((a) => GOAL_PICKS.push(`${h}-${a}`)));
+const GOAL_PICK_LABEL = (p) => {
+  const [h, a] = String(p).split("-");
+  return `${GOAL_LABEL[h] || h} - ${GOAL_LABEL[a] || a}`;
+};
+const isGoalKey = (k) => /GOAL/i.test(String(k || ""));
 
 const $ = (s) => document.querySelector(s);
 
@@ -196,7 +203,8 @@ function resolveResults(rkey, rows) {
   }
   const rnum = _roundNum(rkey);
   const auto = rnum && AUTO.results[rnum];
-  if (auto) {
+  // GOAL系の実結果は "H-A" カテゴリ形式。totoの1/0/2結果を誤って適用しない
+  if (auto && !isGoalKey(rkey)) {
     (rows || []).forEach((m) => {
       const hit = auto[m.match_no];
       // チーム名が一致する場合のみ採用（別カード誤爆防止）
@@ -347,6 +355,59 @@ function optimizeGreedy(rows, budget, mode) {
   return { marks, lines: total, cost: total * TICKET_UNIT, coverage: Math.round(coverageAll * 10000) / 100 };
 }
 
+/* ---------------- 得点買い目最適化（optimizer.py optimize_goal のJS移植） ---------------- */
+const GOAL_TYPE = { 1: "シングル", 2: "ダブル", 3: "トリプル", 4: "フォーメイ" };
+function _goalCov(dist, k) {
+  return Object.values(dist || {}).sort((x, y) => y - x).slice(0, k).reduce((s, v) => s + v, 0) / 100;
+}
+function optimizeGoalGreedy(rows, budget) {
+  const maxLines = Math.max(1, Math.floor(budget / TICKET_UNIT));
+  const teams = [];
+  rows.forEach((a) => {
+    teams.push({ key: `${a.match_no}|home`, match_no: a.match_no, side: "home",
+                 home: a.home, away: a.away, dist: a.home_dist });
+    teams.push({ key: `${a.match_no}|away`, match_no: a.match_no, side: "away",
+                 home: a.home, away: a.away, dist: a.away_dist });
+  });
+  const counts = {}; teams.forEach((t) => (counts[t.key] = 1));
+  let lines = 1;
+  for (;;) {
+    let best = null;
+    for (const t of teams) {
+      const k = counts[t.key];
+      if (k >= GOAL_CATS.length) continue;
+      const newLines = Math.floor(lines / k) * (k + 1);
+      if (newLines > maxLines) continue;
+      const gain = _goalCov(t.dist, k + 1) - _goalCov(t.dist, k);
+      const eff = gain / (newLines - lines);
+      if (!best || eff > best.eff) best = { eff, key: t.key, k, newLines };
+    }
+    if (!best) break;
+    counts[best.key] = best.k + 1;
+    lines = best.newLines;
+  }
+  const marks = rows.map((a) => {
+    const m = { match_no: a.match_no, home: a.home, away: a.away, confidence: a.confidence };
+    let coverage = 1;
+    for (const side of ["home", "away"]) {
+      const t = teams.find((x) => x.match_no === a.match_no && x.side === side);
+      const k = counts[`${a.match_no}|${side}`];
+      const ranked = [...GOAL_CATS].sort((x, y) => (t.dist[y] || 0) - (t.dist[x] || 0))
+        .slice(0, k).sort((x, y) => GOAL_CATS.indexOf(x) - GOAL_CATS.indexOf(y));
+      m[`${side}_picks`] = ranked;
+      m[`${side}_pick`] = side === "home" ? a.home_pick : a.away_pick;
+      m[`${side}_type`] = GOAL_TYPE[k];
+      coverage *= _goalCov(t.dist, k);
+    }
+    m._cov = coverage;
+    return m;
+  });
+  const totalCov = marks.reduce((s, m) => s * m._cov, 1);
+  marks.forEach((m) => delete m._cov);
+  return { marks, lines, cost: lines * TICKET_UNIT,
+           coverage: Math.round(totalCov * 10000) / 100, teams: teams.length };
+}
+
 /* ---------------- マークシートHTML生成 ---------------- */
 function markSheetHTML(marks, roundLabel) {
   const cell = (o, picked) => picked.includes(o)
@@ -362,11 +423,14 @@ function markSheetHTML(marks, roundLabel) {
     <p class="muted">凡例：<span class="mark m1">1</span>シングル <span class="mark m0">0</span>ダブル <span class="mark m2">2</span>トリプル</p></div>`;
 }
 function goalSheetHTML(marks, roundLabel) {
+  const picksOf = (m, side) => (m[`${side}_picks`] || [m[`${side}_pick`]]).map((c) => GOAL_LABEL[c]).join("・");
+  const typeOf = (m, side) => m[`${side}_type`] || "";
   const rows = marks.map((m) =>
     `<tr><td class="ts-no">${m.match_no}</td>` +
     `<td class="ts-match"><b>${esc(m.home)}</b> vs ${esc(m.away)}<br>` +
     `<span class="type-tag">確信度 ${m.confidence}%</span></td>` +
-    `<td>${GOAL_LABEL[m.home_pick]}</td><td>${GOAL_LABEL[m.away_pick]}</td></tr>`).join("");
+    `<td>${picksOf(m, "home")}<br><span class="muted">${esc(typeOf(m, "home"))}</span></td>` +
+    `<td>${picksOf(m, "away")}<br><span class="muted">${esc(typeOf(m, "away"))}</span></td></tr>`).join("");
   return `<div class="card msheet"><h3>${esc(roundLabel)} 得点予想マークシート</h3>
     <table><tr><th></th><th>対戦カード</th><th>ホーム得点</th><th>アウェイ得点</th></tr>${rows}</table></div>`;
 }
@@ -538,7 +602,46 @@ function renderGoal(g) {
       <p>${t.teams}チーム対象・平均確信度 ${t.confidence}%</p>
       <div id="goal-msheet">${goalSheetHTML(t.marks, DATA.round_no)}</div></div>`);
   }
+
+  // 買い目自動提案（予算・得点フォーメーション最適化）
+  html += `<div class="card"><h3 style="margin-top:0">💴 買い目自動提案（予算・狙い方による得点フォーメーション最適化）</h3>
+    <div class="row">
+      <label class="muted">予算(円)<br><input type="number" id="goal_budget" value="1000" step="100" min="100" style="width:110px"></label>
+      <label class="muted">狙い方<br><select id="goal_mode" style="width:150px">
+        <option value="steady">本命堅実</option><option value="upset">波乱狙い</option></select></label>
+      <button class="btn" id="btn-goal-opt">🎯 得点買い目を最適化</button>
+    </div><div id="goal-plan-out"></div></div>`;
+
+  // マイAI育成タブ（得点予想記録・答え合わせ・得点自己学習）
+  html += `<div class="card"><h3 style="margin-top:0">🧠 マイAI育成・得点答え合わせ（この端末専用）</h3>
+    <div id="myai-panel"></div></div>`;
   $("#app").innerHTML = html;
+
+  $("#btn-goal-opt").onclick = () => {
+    const budget = parseInt($("#goal_budget").value || "1000", 10);
+    const mode = $("#goal_mode").value;
+    const plan = optimizeGoalGreedy(rows, budget);
+    const marksHtml = plan.marks.map((m) =>
+      `<tr><td>${m.match_no}</td><td class="l">${esc(m.home)} vs ${esc(m.away)}</td>
+       <td>${(m.home_picks || []).map((c) => `<span class="mark m${GOAL_CATS.indexOf(c) + 1}">${GOAL_LABEL[c]}</span>`).join(" ")}</td>
+       <td>${(m.away_picks || []).map((c) => `<span class="mark m${GOAL_CATS.indexOf(c) + 1}">${GOAL_LABEL[c]}</span>`).join(" ")}</td>
+       <td>${esc(m.home_type || "")} / ${esc(m.away_type || "")}</td></tr>`).join("");
+    $("#goal-plan-out").innerHTML =
+      `<p><b>${plan.lines}口・${plan.cost.toLocaleString()}円・全的中期待度 ${plan.coverage}%</b></p>
+       <div style="overflow-x:auto"><table><tr><th>試合</th><th class="l">対戦カード</th><th>ホーム得点</th><th>アウェイ得点</th><th>種類</th></tr>${marksHtml}</table></div>
+       <div id="goal-plan-sheet" style="margin-top:10px"></div>
+       <p><button class="btn sub" id="btn-goal-dl">⬇ 得点マークシートを保存</button></p>`;
+    const label = `${DATA.round_no} ${g.label || ""}（最適買い目）`;
+    $("#goal-plan-sheet").innerHTML = goalSheetHTML(plan.marks, label);
+    $("#btn-goal-dl").onclick = () => {
+      const blob = new Blob([goalSheetHTML(plan.marks, label)], { type: "text/html" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob); a.download = "toto_goal_mark_sheet.html"; a.click();
+      URL.revokeObjectURL(a.href);
+    };
+  };
+
+  renderMyAiPanel(g);
 }
 
 /* ---------------- 1試合ずつマーク確認モード ---------------- */
@@ -593,10 +696,12 @@ function renderMarkCheck(marks, roundLabel) {
 function renderMyAiPanel(g) {
   const el = $("#myai-panel");
   if (!el) return;
+  const isGoal = g.kind === "goal";
+  const rkey = g.round_key || DATA.round_no;
   const teams = [...new Set((g.rows || []).flatMap((r) => [r.home, r.away]))].sort();
   const p = PROFILE;
 
-  el.innerHTML = `
+  const settingsHtml = isGoal ? "" : `
     <div class="row" style="margin-bottom:8px">
       <label class="muted"><input type="checkbox" id="myai-en" ${p.enabled ? "checked" : ""}> マイAI補正を有効化</label>
       <label class="muted">引き分け全体補正(pt)
@@ -607,16 +712,21 @@ function renderMyAiPanel(g) {
     <div id="team-adj"></div>
     <h4>⭐ 推しクラブ登録（冷静アドバイス用）</h4>
     <details><summary class="muted">推しクラブを選択（${(p.favorites || []).length}件選択中）</summary>
-      <div class="in" id="fav-list" style="max-height:220px;overflow-y:auto"></div></details>
+      <div class="in" id="fav-list" style="max-height:220px;overflow-y:auto"></div></details>`;
+
+  el.innerHTML = settingsHtml + `
+    ${isGoal ? `<p class="muted">ℹ️ チーム別補正・推しクラブは勝敗予想（1/0/2）にのみ適用されます。
+      得点予想では下記の予想記録・答え合わせ・得点自己学習をご利用いただけます。</p>` : ""}
     <h4>📝 戦術メモ・ケガ人・監督交代メモ</h4>
     <textarea id="myai-note" placeholder="例：川崎は主力DF出場停止の噂"></textarea>
     <p><button class="btn sub" id="myai-addnote">➕ メモ追加</button></p>
     <div id="myai-notes"></div>
-    <h4>🎯 この開催回の自分の予想記録</h4>
+    <h4>🎯 この開催回の自分の予想記録（${isGoal ? "ホーム・アウェイ各チームの得点カテゴリ" : "1/0/2"}）</h4>
     <div id="myai-record"></div>
     <h4>📈 過去の答え合わせ・育成レベル</h4>
     <div id="myai-history"></div>`;
 
+  if (!isGoal) {
   // チーム別補正スライダー
   const tadj = $("#team-adj");
   for (const t of teams) {
@@ -654,6 +764,7 @@ function renderMyAiPanel(g) {
     // アドバイスを即時反映するため再描画（スクロール位置は維持されないが許容）
     render();
   };
+  } // !isGoal
 
   // メモ
   const drawNotes = () => {
@@ -675,16 +786,17 @@ function renderMyAiPanel(g) {
   drawNotes();
 
   // 予想記録
-  const rkey = g.round_key || DATA.round_no;
   const existing = {};
   (p.entries || []).filter((e) => e.round_key === rkey).forEach((e) => (existing[e.match_no] = e.pick));
+  const pickOpts = isGoal ? GOAL_PICKS : OUTCOMES;
+  const pickLabel = isGoal ? GOAL_PICK_LABEL : (o) => `${o}：${OUTCOME_LABEL[o]}`;
   $("#myai-record").innerHTML = (g.rows || []).map((m) =>
     `<div class="row" style="margin:4px 0">
       <span class="muted" style="width:120px">第${m.match_no}試合</span>
       <span style="flex:1">${esc(m.home)} vs ${esc(m.away)}</span>
-      <select data-rec="${m.match_no}" style="width:130px">
+      <select data-rec="${m.match_no}" style="width:160px">
         <option value="">未記入</option>
-        ${OUTCOMES.map((o) => `<option value="${o}" ${existing[m.match_no] === o ? "selected" : ""}>${o}：${OUTCOME_LABEL[o]}</option>`).join("")}
+        ${pickOpts.map((o) => `<option value="${o}" ${existing[m.match_no] === o ? "selected" : ""}>${esc(pickLabel(o))}</option>`).join("")}
       </select></div>`).join("");
   const saveBtn = document.createElement("button");
   saveBtn.className = "btn sub"; saveBtn.textContent = "📝 予想をこの端末に記録";
@@ -717,20 +829,42 @@ function drawHistory(g) {
 
   let totalHits = 0, totalJudged = 0, judgedRounds = 0;
   const catStats = { "1": [0, 0], "0": [0, 0], "2": [0, 0] };
+  const goalCatStats = { home: {}, away: {} };
+  GOAL_CATS.forEach((c) => { goalCatStats.home[c] = [0, 0]; goalCatStats.away[c] = [0, 0]; });
+  const fmtPick = (rk, v) => (isGoalKey(rk) ? GOAL_PICK_LABEL(v) : `${v}：${OUTCOME_LABEL[v] || v}`);
+  const fmtActual = (rk, v) => {
+    if (!isGoalKey(rk)) return OUTCOME_LABEL[v] || v;
+    const [h, a] = String(v).split("-");
+    return `${GOAL_LABEL[h] || h} - ${GOAL_LABEL[a] || a}`;
+  };
   let html = "";
   for (const rkey of Object.keys(byRound).sort()) {
     const es = byRound[rkey];
+    const goalRound = isGoalKey(rkey);
     const results = resolveResults(rkey, es);
     const judged = es.filter((e) => results[e.match_no]);
     const hits = judged.filter((e) => e.pick === results[e.match_no]).length;
-    judged.forEach((e) => { catStats[e.pick][1]++; catStats[e.pick][0] += e.pick === results[e.match_no] ? 1 : 0; });
+    judged.forEach((e) => {
+      if (goalRound && "-" in e.pick && "-" in results[e.match_no]) {
+        const [ph, pa] = e.pick.split("-"), [ah, aa] = results[e.match_no].split("-");
+        [["home", ph, ah], ["away", pa, aa]].forEach(([side, pc, ac]) => {
+          if (goalCatStats[side][pc] && goalCatStats[side][ac] !== undefined) {
+            goalCatStats[side][pc][1]++;
+            goalCatStats[side][pc][0] += pc === ac ? 1 : 0;
+          }
+        });
+      } else if (!goalRound && catStats[e.pick]) {
+        catStats[e.pick][1]++; catStats[e.pick][0] += e.pick === results[e.match_no] ? 1 : 0;
+      }
+    });
     totalHits += hits; totalJudged += judged.length;
     const acc = judged.length ? Math.round(hits / judged.length * 1000) / 10 : null;
     if (acc !== null) judgedRounds++;
     const stake = (PROFILE.stakes || {})[rkey] || {};
     const recovery = stake.investment && stake.payout
       ? Math.round(stake.payout / stake.investment * 1000) / 10 : null;
-    html += `<details><summary>${esc(es[0].round_label || rkey)}：記録${es.length}件・的中${hits}件・的中率 ${acc === null ? "未確定" : acc + "%"}・回収率 ${recovery === null ? "—" : recovery + "%"}</summary>
+    const unit = goalRound ? "組合せ" : "試合";
+    html += `<details><summary>${esc(es[0].round_label || rkey)}：記録${es.length}${unit}・的中${hits}${unit}・的中率 ${acc === null ? "未確定" : acc + "%"}・回収率 ${recovery === null ? "—" : recovery + "%"}</summary>
       <div class="in">
         <div class="row">
           <label class="muted">投資額<input type="number" class="stake-inv" data-rk="${esc(rkey)}" value="${stake.investment || ""}" step="100" style="width:90px"></label>
@@ -742,23 +876,33 @@ function drawHistory(g) {
         const a = results[e.match_no];
         const man = ((PROFILE.manual_results || {})[rkey] || {})[e.match_no];
         const resCell = a
-          ? OUTCOME_LABEL[a] || a
-          : `<select class="res-man" data-rk="${esc(rkey)}" data-no="${e.match_no}" style="width:110px">
+          ? fmtActual(rkey, a)
+          : `<select class="res-man" data-rk="${esc(rkey)}" data-no="${e.match_no}" style="width:170px">
                <option value="">未確定（手動入力）</option>
-               ${OUTCOMES.map((o) => `<option value="${o}" ${man === o ? "selected" : ""}>${o}：${OUTCOME_LABEL[o]}</option>`).join("")}
+               ${(goalRound ? GOAL_PICKS : OUTCOMES).map((o) =>
+                 `<option value="${o}" ${man === o ? "selected" : ""}>${esc(fmtPick(rkey, o))}</option>`).join("")}
              </select>`;
         return `<tr><td>${e.match_no}</td><td class="l">${esc(e.home)} vs ${esc(e.away)}</td>
-          <td>${e.pick}</td><td>${resCell}</td>
+          <td>${esc(fmtPick(rkey, e.pick))}</td><td>${resCell}</td>
           <td>${a ? (e.pick === a ? "⭕" : "❌") : "—"}</td></tr>`;
       }).join("") + `</table></div></details>`;
   }
   const level = Math.min(100, totalHits * 10 + judgedRounds * 5);
   const catRows = Object.entries(catStats).filter(([, v]) => v[1] > 0)
     .map(([k, [h, t]]) => `<tr><td>${k}：${OUTCOME_LABEL[k]}</td><td>${Math.round(h / t * 1000) / 10}%</td><td>${t}</td></tr>`).join("");
+  const goalCatRows = [];
+  for (const side of ["home", "away"]) {
+    for (const c of GOAL_CATS) {
+      const [h, t] = goalCatStats[side][c];
+      if (t > 0) goalCatRows.push(
+        `<tr><td>${side === "home" ? "ホーム" : "アウェイ"}得点 ${GOAL_LABEL[c]}</td><td>${Math.round(h / t * 1000) / 10}%</td><td>${t}</td></tr>`);
+    }
+  }
   html += `<div class="row" style="margin:10px 0">
       <div class="level">Lv.${level}</div><div class="muted">スコア ${level}/100<br>累計的中 ${totalHits}件 / 判定済 ${totalJudged}件</div></div>
     <div class="bar"><i style="width:${level}%"></i></div>
-    ${catRows ? `<h4>カテゴリ別得意度</h4><table>${catRows}</table>` : ""}`;
+    ${catRows ? `<h4>カテゴリ別得意度（勝敗 1/0/2）</h4><table>${catRows}</table>` : ""}
+    ${goalCatRows.length ? `<h4>得点カテゴリ別得意度（totoGOAL）</h4><table>${goalCatRows.join("")}</table>` : ""}`;
   el.innerHTML = html;
 
   // 🧠 AI自己学習チューニング（Mac側の答え合わせ履歴から自動学習した補正係数）
@@ -782,6 +926,29 @@ function drawHistory(g) {
              style="flex:1;background:var(--blue);height:${Math.max(4, (h.accuracy || 0) * 0.6)}px;border-radius:3px 3px 0 0"></div>`).join("") +
         `</div><p class="muted">直近の的中率推移（バー）</p>`;
     }
+  }
+
+  // 🎯 得点予想（totoGOAL3/2）の自己学習チューニング
+  const GL = (L && L.goal) || {};
+  const gm = GL.metrics || {};
+  if (gm.n) {
+    const gc = GL.coefficients || {};
+    const biasPt = gm.bias_pt || {};
+    const goalRows = [];
+    for (const side of ["home", "away"]) {
+      for (const c of GOAL_CATS) {
+        const bias = ((biasPt[side] || {})[c]);
+        if (bias === undefined) continue;
+        const mult = (((gc[side] || {})[c]) ?? 1);
+        goalRows.push(`<tr><td>${side === "home" ? "ホーム" : "アウェイ"}得点 ${GOAL_LABEL[c]}</td>
+          <td>${bias >= 0 ? "+" : ""}${bias}pt</td><td><b>×${Number(mult).toFixed(2)}</b></td></tr>`);
+      }
+    }
+    el.innerHTML += `<h4>🎯 得点予想のAI自己学習チューニング（totoGOAL3/2）</h4>
+      <p class="muted">判定済 ${gm.n}チーム予想（${gm.matches || 0}試合）・チーム的中率 ${gm.team_accuracy}%・両チーム完全的中 ${gm.exact_accuracy}%・最終学習 ${esc(L.updated_at || "—")}</p>
+      <table><tr><th>対象</th><th>バイアス</th><th>次回への乗数</th></tr>${goalRows.join("")}</table>
+      <p class="muted">過去の得点誤差（カテゴリの予測頻度と実際頻度のズレ）を分析し、
+       次回の得点確率へカテゴリ別乗数（×0.6〜×1.4）として自動反映しています。</p>`;
   }
 
   document.querySelectorAll(".stake-save").forEach((b) => b.onclick = () => {

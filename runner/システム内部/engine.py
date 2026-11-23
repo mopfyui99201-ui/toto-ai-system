@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 
 import database as db
 import live_fetcher
@@ -126,6 +128,44 @@ def _match_stored_round(round_no: str) -> str:
     return ""
 
 
+def _norm_team(name: str) -> str:
+    """チーム名の表記ゆれを吸収する（FC・空白・中黒・長音を除去）。"""
+    n = unicodedata.normalize("NFKC", name or "")
+    return re.sub(r"[\s・\-ー]", "", n).replace("FC", "").replace("ｆｃ", "")
+
+
+def _goal_cat(goals: int) -> str:
+    return "0" if goals == 0 else "1" if goals == 1 else "2" if goals == 2 else "3+"
+
+
+def _autofill_goal_results(data: dict) -> int:
+    """公式スコアから得点予想（GOAL系）の実結果 "H-A" を各開催回へ自動入力する。
+
+    対象は公式結果ページと同じ開催回（round_no の基底が一致するもの）のみ。
+    対戦カードはチーム名の正規化一致で誤爆を防ぐ。戻り値は反映試合数。
+    """
+    official = data.get("matches") or []
+    base = data.get("round_no") or ""
+    if not official or not base:
+        return 0
+    filled_total = 0
+    for r in db.list_rounds():
+        rkey = r["round_no"]
+        if "GOAL" not in rkey or rkey.split("｜")[0] != base:
+            continue
+        results: dict[int, str] = {}
+        for m in db.get_matches(rkey):
+            nh, na = _norm_team(m.get("home")), _norm_team(m.get("away"))
+            hit = next((o for o in official
+                        if _norm_team(o.get("home")) == nh and _norm_team(o.get("away")) == na), None)
+            if hit and hit.get("home_goals") is not None and hit.get("away_goals") is not None:
+                results[m["match_no"]] = f"{_goal_cat(hit['home_goals'])}-{_goal_cat(hit['away_goals'])}"
+        if results:
+            db.save_results(rkey, results)
+            filled_total += len(results)
+    return filled_total
+
+
 def fetch_and_autofill_results(investment: int = 1000) -> dict:
     """公式から確定結果（スコア・1/0/2）を自動取得し、対応する開催回へ自動入力する。
 
@@ -144,4 +184,5 @@ def fetch_and_autofill_results(investment: int = 1000) -> dict:
     data["filled_map"] = filled
     data["target_round"] = target
     data["auto_saved"] = saved
+    data["goal_filled"] = _autofill_goal_results(data)
     return data

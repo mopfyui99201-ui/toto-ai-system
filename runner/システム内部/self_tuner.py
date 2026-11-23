@@ -19,7 +19,7 @@ import math
 from datetime import datetime
 
 import database as db
-from config import USER_DIR
+from config import GOAL_CATEGORIES, USER_DIR
 
 TUNING_PATH = USER_DIR / "tuning.json"
 MIN_SAMPLES = 8          # これ未満では係数をゼロのままにする
@@ -30,7 +30,13 @@ OUTCOMES = ("1", "0", "2")
 # 結果 → 係数名 / 表示名
 _META = {"1": ("home", "ホーム勝ち"), "0": ("draw", "引き分け"), "2": ("away", "アウェイ勝ち")}
 
-_cache: dict = {"mtime": None, "coeffs": {"draw": 0.0, "home": 0.0, "away": 0.0}}
+def _default_goal_coeffs() -> dict:
+    return {"home": dict.fromkeys(GOAL_CATEGORIES, 1.0),
+            "away": dict.fromkeys(GOAL_CATEGORIES, 1.0)}
+
+
+_cache: dict = {"mtime": None, "coeffs": {"draw": 0.0, "home": 0.0, "away": 0.0},
+               "goal_coeffs": _default_goal_coeffs()}
 
 
 def collect_judged() -> list[dict]:
@@ -120,6 +126,9 @@ def recompute() -> dict:
     rows = collect_judged()
     metrics = analyze(rows)
     coeffs = _coefficients_from(metrics)
+    goal_rows = collect_judged_goals()
+    goal_metrics = analyze_goals(goal_rows)
+    goal_coeffs = _goal_coefficients_from(goal_metrics)
     history = []
     if TUNING_PATH.exists():
         try:
@@ -132,16 +141,20 @@ def recompute() -> dict:
         "accuracy": metrics.get("accuracy"),
         "bias_pt": metrics.get("bias_pt", {}),
         "coeffs": coeffs,
+        "goal_n": goal_metrics.get("n", 0),
+        "goal_accuracy": goal_metrics.get("team_accuracy"),
     })
     payload = {
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "min_samples": MIN_SAMPLES,
         "coefficients": coeffs,
         "metrics": metrics,
+        "goal": {"coefficients": goal_coeffs, "metrics": goal_metrics},
         "history": history[-30:],
     }
     TUNING_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    _cache.update({"mtime": TUNING_PATH.stat().st_mtime, "coeffs": dict(coeffs)})
+    _cache.update({"mtime": TUNING_PATH.stat().st_mtime, "coeffs": dict(coeffs),
+                   "goal_coeffs": goal_coeffs})
     return payload
 
 
@@ -156,10 +169,23 @@ def coefficients() -> dict[str, float]:
             data = json.loads(TUNING_PATH.read_text(encoding="utf-8"))
             coeffs = data.get("coefficients", {})
             _cache["coeffs"] = {k: float(coeffs.get(k, 0.0)) for k in ("draw", "home", "away")}
+            goal = (data.get("goal") or {}).get("coefficients") or {}
+            merged = _default_goal_coeffs()
+            for side in ("home", "away"):
+                for cat in GOAL_CATEGORIES:
+                    if cat in (goal.get(side) or {}):
+                        merged[side][cat] = float(goal[side][cat])
+            _cache["goal_coeffs"] = merged
         except (ValueError, OSError, TypeError):
             pass
         _cache["mtime"] = mtime
     return dict(_cache["coeffs"])
+
+
+def goal_coefficients() -> dict:
+    """得点予想へ適用するカテゴリ別乗数（predictor/goal_predictor が使用）。"""
+    coefficients()  # mtimeキャッシュを最新化するため呼ぶ
+    return _cache["goal_coeffs"]
 
 
 def summary() -> dict:
@@ -171,6 +197,103 @@ def summary() -> dict:
             pass
     return {"updated_at": "", "coefficients": {"draw": 0.0, "home": 0.0, "away": 0.0},
             "metrics": {"n": 0}, "history": []}
+
+
+# --- 得点予想（totoGOAL3 / totoGOAL2）の自己学習 ------------------------------
+GOAL_MIN_SAMPLES = 8
+GOAL_MAX_MULT = 0.4        # カテゴリ補正は ×0.6〜×1.4 の範囲
+GOAL_SIDE = (("home", "home_dist", "home_pick"), ("away", "away_dist", "away_pick"))
+
+
+def _parse_goal_actual(actual: str) -> tuple[str, str] | None:
+    """"1-2" / "3+-0" 形式の実結果を (ホーム得点cat, アウェイ得点cat) へ分解する。"""
+    if not actual or "-" not in actual:
+        return None
+    h, a = actual.split("-", 1)
+    if h in GOAL_CATEGORIES and a in GOAL_CATEGORIES:
+        return h, a
+    return None
+
+
+def collect_judged_goals() -> list[dict]:
+    """得点予想の的中履歴を集める（結果は "H-A" カテゴリ形式で保存されている前提）。"""
+    import goal_predictor  # 循環import回避のため関数内で読み込む
+
+    rows: list[dict] = []
+    for r in db.list_rounds():
+        rkey = r["round_no"]
+        if "GOAL" not in rkey:
+            continue
+        results = db.get_results(rkey)
+        if not results:
+            continue
+        matches = db.get_matches(rkey)
+        if not matches:
+            continue
+        analyzed = {a["match_no"]: a for a in goal_predictor.analyze_goal_round(matches)}
+        for no, actual in results.items():
+            parsed = _parse_goal_actual(actual)
+            a = analyzed.get(no)
+            if not parsed or not a:
+                continue
+            rows.append({
+                "round_no": rkey, "match_no": no,
+                "actual_h": parsed[0], "actual_a": parsed[1],
+                "home_dist": a["home_dist"], "away_dist": a["away_dist"],
+                "home_pick": a["home_pick"], "away_pick": a["away_pick"],
+            })
+    return rows
+
+
+def analyze_goals(rows: list[dict]) -> dict:
+    """得点予想のカテゴリ別バイアス・的中率を算出する。"""
+    teams = []
+    for r in rows:
+        for side, dist_k, pick_k, act_k in (
+            ("home", "home_dist", "home_pick", "actual_h"),
+            ("away", "away_dist", "away_pick", "actual_a"),
+        ):
+            teams.append({"side": side, "dist": r[dist_k], "pick": r[pick_k],
+                          "actual": r[act_k]})
+    n = len(teams)
+    if not n:
+        return {"n": 0, "matches": 0}
+    bias: dict[str, dict[str, float]] = {}
+    rates: dict[str, dict[str, float]] = {}
+    for side in ("home", "away"):
+        subset = [t for t in teams if t["side"] == side]
+        m = len(subset)
+        bias[side] = {}
+        rates[side] = {}
+        for cat in GOAL_CATEGORIES:
+            mean_pred = sum(t["dist"][cat] for t in subset) / m
+            actual_rate = sum(1 for t in subset if t["actual"] == cat) / m * 100
+            bias[side][cat] = round(actual_rate - mean_pred, 1)
+            rates[side][cat] = round(actual_rate, 1)
+    hits = sum(1 for t in teams if t["pick"] == t["actual"])
+    exact = sum(1 for r in rows
+                if r["home_pick"] == r["actual_h"] and r["away_pick"] == r["actual_a"])
+    return {
+        "n": n, "matches": len(rows),
+        "team_accuracy": round(hits / n * 100, 1),
+        "exact_accuracy": round(exact / len(rows) * 100, 1),
+        "bias_pt": bias, "actual_rate": rates,
+    }
+
+
+def _goal_coefficients_from(metrics: dict) -> dict:
+    """得点カテゴリ別の予測バイアスから確率乗数（1.0基準）を求める。"""
+    coeffs = _default_goal_coeffs()
+    n = metrics.get("n", 0)
+    if n < GOAL_MIN_SAMPLES:
+        return coeffs
+    shrink = n / (n + SHRINK_N)
+    for side in ("home", "away"):
+        for cat in GOAL_CATEGORIES:
+            bias_frac = metrics["bias_pt"][side][cat] / 100.0
+            mult = 1.0 + bias_frac * GAIN * shrink
+            coeffs[side][cat] = round(max(1 - GOAL_MAX_MULT, min(1 + GOAL_MAX_MULT, mult)), 4)
+    return coeffs
 
 
 def safe_recompute() -> dict:

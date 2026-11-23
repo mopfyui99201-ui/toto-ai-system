@@ -64,12 +64,14 @@ def build_site_data() -> dict:
     games: dict[str, dict] = {}
     for game_type, game in bundle["games"].items():
         meta = GAME_TYPES.get(game_type, {})
-        payload: dict = {"kind": meta.get("kind", "win_draw"), "label": meta.get("label", game_type)}
+        round_key = engine.live_round_key(bundle["round_no"], game_type)
+        payload: dict = {"kind": meta.get("kind", "win_draw"), "label": meta.get("label", game_type),
+                         "round_key": round_key}
         if meta.get("kind") == "goal":
             payload.update(_goal_payload(game))
+            # 得点結果（"H-A"カテゴリ形式）を答え合わせ用に同梱する
+            payload["results"] = {str(k): v for k, v in db.get_results(round_key).items()}
         else:
-            round_key = engine.live_round_key(bundle["round_no"], game_type)
-            payload["round_key"] = round_key
             payload.update(_win_draw_payload(round_key, db.get_matches(round_key)))
         games[game_type] = payload
     return {
