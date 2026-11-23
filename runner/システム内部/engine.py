@@ -31,6 +31,11 @@ def run_round(round_data: dict, enable_news: bool = False) -> dict:
     db.init_db()
     matches = round_data["matches"]
     news_map = news_adjuster.analyze_round(matches, enabled=enable_news)
+    # ニュース補正量を試合ペイロードへ保存（self_tuner の特徴量重み学習で使用）
+    for m in matches:
+        shift = (news_map.get(m["match_no"]) or {}).get("shift")
+        if shift:
+            m["news_shift"] = shift
     preds = predict_round(matches, news_map)
     for p in preds:
         p["news_note"] = news_map.get(p["match_no"], {}).get("note", "")

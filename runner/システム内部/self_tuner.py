@@ -36,7 +36,7 @@ def _default_goal_coeffs() -> dict:
 
 
 _cache: dict = {"mtime": None, "coeffs": {"draw": 0.0, "home": 0.0, "away": 0.0},
-               "goal_coeffs": _default_goal_coeffs()}
+               "goal_coeffs": _default_goal_coeffs(), "weights": None}
 
 
 def collect_judged() -> list[dict]:
@@ -129,6 +129,8 @@ def recompute() -> dict:
     goal_rows = collect_judged_goals()
     goal_metrics = analyze_goals(goal_rows)
     goal_coeffs = _goal_coefficients_from(goal_metrics)
+    weights = learn_feature_weights()
+    growth = growth_series()
     history = []
     if TUNING_PATH.exists():
         try:
@@ -150,11 +152,13 @@ def recompute() -> dict:
         "coefficients": coeffs,
         "metrics": metrics,
         "goal": {"coefficients": goal_coeffs, "metrics": goal_metrics},
+        "weights": weights,
+        "growth": growth[-40:],
         "history": history[-30:],
     }
     TUNING_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     _cache.update({"mtime": TUNING_PATH.stat().st_mtime, "coeffs": dict(coeffs),
-                   "goal_coeffs": goal_coeffs})
+                   "goal_coeffs": goal_coeffs, "weights": weights})
     return payload
 
 
@@ -176,6 +180,7 @@ def coefficients() -> dict[str, float]:
                     if cat in (goal.get(side) or {}):
                         merged[side][cat] = float(goal[side][cat])
             _cache["goal_coeffs"] = merged
+            _cache["weights"] = data.get("weights")
         except (ValueError, OSError, TypeError):
             pass
         _cache["mtime"] = mtime
@@ -302,3 +307,130 @@ def safe_recompute() -> dict:
         return recompute()
     except Exception:
         return summary()
+
+
+# --- 多次元特徴量の重み自動学習 ----------------------------------------------
+# 確定結果の蓄積データでソフトマックス回帰を学習し、5つの特徴量の重みを
+# tuning.json の "weights" へ保存。predictor が次回予測へブレンド適用する。
+WEIGHT_FEATURES = ("form_diff", "power_diff", "home_adv", "news_shift", "draw_rate")
+WEIGHT_LABELS = {
+    "form_diff": "直近フォーム差",
+    "power_diff": "順位・戦力差",
+    "home_adv": "ホーム優位度",
+    "news_shift": "ニュース・怪我人補正",
+    "draw_rate": "引き分け発生率",
+}
+MIN_WEIGHT_SAMPLES = 30     # これ未満では重みモデルを無効化
+WEIGHT_BLEND_MAX = 0.35     # ベース予測へのブレンド上限（サンプル増で漸近）
+WEIGHT_SHRINK_N = 60.0
+_WEIGHT_EPOCHS = 400
+_WEIGHT_LR = 0.5
+_WEIGHT_L2 = 0.02
+
+
+def match_weight_features(match: dict) -> list[float]:
+    """勝敗予想の5次元特徴量を取り出す（predictor/self_tuner 共用）。"""
+    return [
+        float(match.get("home_recent_form", 0.5) - match.get("away_recent_form", 0.5)),
+        float((match.get("away_rank", 10) - match.get("home_rank", 10)) / 20.0
+              + (match.get("home_win_rate", 0.45) - match.get("away_win_rate", 0.45))),
+        1.0,  # ホーム側の残差バイアス（得点λのHOME_ADVANTAGEとは別に学習）
+        float(match.get("news_shift", 0.0) or 0.0),
+        float((match.get("home_draw_rate", 0.25) + match.get("away_draw_rate", 0.25)) / 2),
+    ]
+
+
+def learn_feature_weights() -> dict:
+    """ラベル付き試合（勝敗のみ）でソフトマックス回帰を学習し重みを返す。"""
+    import numpy as np
+
+    samples: list[tuple[list[float], int]] = []
+    for m, actual in db.all_labeled_samples():
+        if actual not in OUTCOMES or "-" in actual:
+            continue
+        samples.append((match_weight_features(m), OUTCOMES.index(actual)))
+    n = len(samples)
+    if n < MIN_WEIGHT_SAMPLES:
+        return {"ready": False, "n": n, "features": list(WEIGHT_FEATURES)}
+
+    x = np.array([s[0] for s in samples])
+    y = np.array([s[1] for s in samples])
+    mean = x.mean(axis=0)
+    std = x.std(axis=0)
+    std[std < 1e-6] = 1.0
+    xb = np.hstack([(x - mean) / std, np.ones((n, 1))])
+    target = np.eye(3)[y]
+    w = np.zeros((xb.shape[1], 3))
+    for _ in range(_WEIGHT_EPOCHS):
+        logits = xb @ w
+        logits -= logits.max(axis=1, keepdims=True)
+        exp = np.exp(logits)
+        p = exp / exp.sum(axis=1, keepdims=True)
+        grad = xb.T @ (p - target) / n + _WEIGHT_L2 * w
+        grad[-1] *= 0.2  # バイアス項は緩く正則化
+        w -= _WEIGHT_LR * grad
+    pred = (xb @ w).argmax(axis=1)
+    acc = float((pred == y).mean() * 100)
+    return {
+        "ready": True, "n": n, "features": list(WEIGHT_FEATURES),
+        "labels": {f: WEIGHT_LABELS[f] for f in WEIGHT_FEATURES},
+        "mean": mean.tolist(), "std": std.tolist(), "W": w.tolist(),
+        "train_accuracy": round(acc, 1),
+    }
+
+
+def feature_weights() -> dict | None:
+    """predictor が使う現在の特徴量重み（ファイル更新を検知して自動リロード）。"""
+    coefficients()  # mtimeキャッシュを最新化するため呼ぶ
+    return _cache.get("weights")
+
+
+def weight_summary() -> dict:
+    """UI表示用：特徴量ごとの重み強度（3クラス重みの絶対値合計）を返す。"""
+    w = feature_weights() or {}
+    if not w.get("ready"):
+        return {"ready": False, "n": w.get("n", 0)}
+    rows = []
+    for i, name in enumerate(w["features"]):
+        importance = sum(abs(w["W"][i][j]) for j in range(3))
+        rows.append({"feature": name, "label": w.get("labels", {}).get(name, name),
+                     "importance": round(importance, 4)})
+    top = max((r["importance"] for r in rows), default=1.0) or 1.0
+    for r in rows:
+        r["bar"] = round(r["importance"] / top * 100)
+    rows.sort(key=lambda r: -r["importance"])
+    return {"ready": True, "n": w["n"], "train_accuracy": w.get("train_accuracy"),
+            "features": rows}
+
+
+# --- AI成長推移（回ごとの的中率・仮想回収率） ---------------------------------
+def growth_series() -> list[dict]:
+    """勝敗系の開催回ごとの的中率と仮想回収率を時系列で返す（グラフ用）。
+
+    仮想回収率は「投資1,000円・的中1試合=400円相当」と仮定した試算値
+    （的中数 × 40%）。実際の払戻は回・等級で変動するため参考表示用。
+    """
+    series: list[dict] = []
+    for r in db.list_rounds():
+        rkey = r["round_no"]
+        if "GOAL" in rkey:
+            continue
+        preds = db.get_predictions(rkey)
+        results = db.get_results(rkey)
+        if not preds or not results:
+            continue
+        judged = {no: a for no, a in results.items()
+                  if no in preds and a in OUTCOMES}
+        if not judged:
+            continue
+        hits = sum(1 for no, a in judged.items() if preds[no].get("predicted") == a)
+        total = len(judged)
+        series.append({
+            "round_no": rkey,
+            "held_date": r.get("held_date", ""),
+            "hits": hits, "total": total,
+            "accuracy": round(hits / total * 100, 1),
+            "recovery": round(hits * 40.0, 1),
+        })
+    series.sort(key=lambda s: s["round_no"])
+    return series

@@ -136,6 +136,7 @@ def predict_match(match: dict, news_adjust: dict | None = None) -> dict:
 
     probs = _apply_news(probs, news_adjust)
     probs = _apply_h2h(probs, match)
+    probs = _apply_weights(probs, match)
     probs = _apply_learning(probs)
     total = sum(probs.values())
     probs = {o: probs[o] / total for o in OUTCOMES}
@@ -159,7 +160,38 @@ def _apply_news(probs: dict[str, float], news_adjust: dict | None) -> dict[str, 
     out["1"] *= 1 + shift
     out["2"] *= 1 - shift
     out["0"] *= 1 + abs(shift) * 0.3
+    if news_adjust.get("rain"):  # 雨天はロースコア・引き分け増
+        out["0"] *= 1.10
+        out["1"] *= 0.96
+        out["2"] *= 0.96
     return out
+
+
+def _apply_weights(probs: dict[str, float], match: dict) -> dict[str, float]:
+    """確定結果の蓄積から学習した特徴量重みモデルを勝率へブレンドする。
+
+    self_tuner.learn_feature_weights() が tuning.json の "weights" を更新するたび
+    最新モデルを使う。サンプル数に応じてブレンド率を 0〜35% へ縮小する。
+    """
+    w = self_tuner.feature_weights()
+    if not w or not w.get("ready"):
+        return probs
+    try:
+        import numpy as np
+
+        x = np.asarray(self_tuner.match_weight_features(match), dtype=float)
+        xs = (x - np.asarray(w["mean"])) / np.asarray(w["std"])
+        xb = np.append(xs, 1.0)
+        logits = xb @ np.asarray(w["W"])
+        logits -= logits.max()
+        exp = np.exp(logits)
+        model = exp / exp.sum()
+        n = float(w.get("n", 0))
+        alpha = 0.35 * n / (n + 60.0)
+        return {o: probs[o] * (1 - alpha) + float(model[i]) * alpha
+                for i, o in enumerate(OUTCOMES)}
+    except Exception:
+        return probs
 
 
 def _apply_learning(probs: dict[str, float]) -> dict[str, float]:

@@ -560,6 +560,7 @@ function renderWinDraw(g) {
          <div id="markcheck" style="margin-top:10px"></div></details>
        <p><button class="btn sub" id="btn-dl">⬇ マークシートを保存</button></p>`;
     $("#msheet").innerHTML = markSheetHTML(plan.marks, g.round_key || DATA.round_no);
+    wireMarkCheck($("#plan-out"));
     $("#btn-dl").onclick = () => {
       const blob = new Blob([markSheetHTML(plan.marks, g.round_key || DATA.round_no)], { type: "text/html" });
       const a = document.createElement("a");
@@ -633,6 +634,7 @@ function renderGoal(g) {
        <p><button class="btn sub" id="btn-goal-dl">⬇ 得点マークシートを保存</button></p>`;
     const label = `${DATA.round_no} ${g.label || ""}（最適買い目）`;
     $("#goal-plan-sheet").innerHTML = goalSheetHTML(plan.marks, label);
+    wireMarkCheck($("#goal-plan-out"));
     $("#btn-goal-dl").onclick = () => {
       const blob = new Blob([goalSheetHTML(plan.marks, label)], { type: "text/html" });
       const a = document.createElement("a");
@@ -641,6 +643,7 @@ function renderGoal(g) {
     };
   };
 
+  wireMarkCheck(document);
   renderMyAiPanel(g);
 }
 
@@ -690,6 +693,41 @@ function renderMarkCheck(marks, roundLabel) {
     }
   };
   draw();
+}
+
+/* ---------------- マークシート 購入確認チェックモード ---------------- */
+function wireMarkCheck(root) {
+  (root || document).querySelectorAll(".msheet").forEach((sheet) => {
+    if (sheet.dataset.mcheck) return;
+    sheet.dataset.mcheck = "1";
+    const marks = [...sheet.querySelectorAll("td .mark")];
+    const total = marks.length;
+    const bar = document.createElement("div");
+    bar.className = "mcheck-bar";
+    bar.innerHTML = `<button class="btn sub" style="padding:5px 12px;font-size:.8rem">☑ 購入確認チェック</button>
+      <span class="muted mcheck-count"></span>`;
+    sheet.insertBefore(bar, sheet.firstChild);
+    const btn = bar.querySelector("button");
+    const cnt = bar.querySelector(".mcheck-count");
+    const update = () => {
+      const c = marks.filter((m) => m.classList.contains("ck")).length;
+      cnt.textContent = sheet.classList.contains("check-on")
+        ? `確認済み ${c} / ${total}（購入画面への転記ミス防止用）` : "タップで各買い目を✓チェックできます";
+    };
+    btn.onclick = () => {
+      sheet.classList.toggle("check-on");
+      const on = sheet.classList.contains("check-on");
+      btn.textContent = on ? "✅ チェックモード中（マークをタップ）" : "☑ 購入確認チェック";
+      if (!on) marks.forEach((m) => m.classList.remove("ck"));
+      update();
+    };
+    marks.forEach((m) => (m.onclick = () => {
+      if (!sheet.classList.contains("check-on")) return;
+      m.classList.toggle("ck");
+      update();
+    }));
+    update();
+  });
 }
 
 /* ---------------- マイAI育成パネル ---------------- */
@@ -949,6 +987,33 @@ function drawHistory(g) {
       <table><tr><th>対象</th><th>バイアス</th><th>次回への乗数</th></tr>${goalRows.join("")}</table>
       <p class="muted">過去の得点誤差（カテゴリの予測頻度と実際頻度のズレ）を分析し、
        次回の得点確率へカテゴリ別乗数（×0.6〜×1.4）として自動反映しています。</p>`;
+  }
+
+  // 🧬 多次元特徴量の重み自動学習
+  const W = L && L.weights;
+  if (W && W.ready) {
+    const wRows = (W.features || []).map((f) =>
+      `<tr><td>${esc(f.label || f.feature)}</td><td>${f.importance}</td>
+       <td><div class="bar" style="height:10px"><i style="width:${f.bar || 0}%"></i></div></td></tr>`).join("");
+    el.innerHTML += `<h4>🧬 特徴量重みの自動学習（多次元・確定結果から最適化）</h4>
+      <p class="muted">学習サンプル ${W.n}件・訓練上的中率 ${W.train_accuracy}%・次回予測へ最大35%ブレンド</p>
+      <table><tr><th>特徴量</th><th>重み強度</th><th></th></tr>${wRows}</table>
+      <p class="muted">直近フォーム差・順位戦力差・ホーム優位・ニュース怪我人補正・引き分け発生率を
+       ソフトマックス回帰で自動重み付けし、予測へ反映しています。</p>`;
+  }
+
+  // 📈 AI成長推移（回ごとの的中率・仮想回収率）
+  const growth = (L && L.growth) || [];
+  if (growth.length > 1) {
+    const maxRec = Math.max(...growth.map((g) => g.recovery || 0), 1);
+    el.innerHTML += `<h4>📈 AI成長推移（開催回ごとの的中率・仮想回収率）</h4>` +
+      growth.map((g) => `<div class="row" style="margin:3px 0;font-size:.8rem">
+        <span class="muted" style="width:86px">${esc(g.round_no.slice(-8))}</span>
+        <div class="bar" style="flex:1" title="的中率 ${g.accuracy}%"><i style="width:${g.accuracy}%"></i></div>
+        <span style="width:44px;text-align:right">${g.accuracy}%</span>
+        <div class="bar g" style="flex:1" title="仮想回収率 ${g.recovery}%"><i style="width:${Math.min(100, g.recovery / maxRec * 100)}%"></i></div>
+        <span style="width:52px;text-align:right">${g.recovery}%</span></div>`).join("") +
+      `<p class="muted">青=的中率／グレー=仮想回収率（投資1,000円・的中1試合=400円相当の試算）</p>`;
   }
 
   document.querySelectorAll(".stake-save").forEach((b) => b.onclick = () => {

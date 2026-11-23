@@ -20,6 +20,8 @@ POSITIVE = {
     "good_form": (["連勝", "好調", "無敗"], 0.05),
     "reinforce": (["新加入", "補強", "加入"], 0.03),
 }
+# 雨天・悪天候キーワード（ロースコア・引き分け増の根拠）
+WEATHER_WORDS = ("雨", "雨天", "大雨", "雷雨", "台風", "強風", "暴風", "雪", "降水")
 
 
 @functools.lru_cache(maxsize=64)
@@ -56,7 +58,14 @@ def analyze_team(team: str) -> dict:
         "shift": round(neg + pos, 3),
         "reasons": neg_reasons + pos_reasons,
         "has_news": bool(text),
+        "text": text,
     }
+
+
+def match_weather(home: str, away: str) -> bool:
+    """対戦カードの天気予報ニュースを検索し、雨天・悪天候の可能性を判定する。"""
+    text = " ".join(search_news(f"{home} {away} 天気 予報 雨", max_results=3))
+    return any(w in text for w in WEATHER_WORDS)
 
 
 def analyze_match(match: dict) -> dict:
@@ -70,9 +79,14 @@ def analyze_match(match: dict) -> dict:
         notes.append(f"【{match['home']}】" + "・".join(home["reasons"]))
     if away["reasons"]:
         notes.append(f"【{match['away']}】" + "・".join(away["reasons"]))
+    # 開催直前の天候情報（雨天はロースコア・引き分け増として predictor へ伝達）
+    rain = match_weather(match["home"], match["away"])
+    if rain:
+        notes.append("☔ 雨天・悪天候の可能性（ロースコア・引き分け増を考慮）")
     return {
         "match_no": match["match_no"],
         "shift": round(max(-0.25, min(0.25, shift)), 3),
+        "rain": rain,
         "note": " / ".join(notes) if notes else "特筆すべき最新情報なし",
     }
 

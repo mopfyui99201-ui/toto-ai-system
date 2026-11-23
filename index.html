@@ -68,6 +68,12 @@
   .autobar .st { color:var(--sub); }
   .autobar details { flex-basis:100%; }
   .autobar details summary { padding:6px 0; font-size:.78rem; color:var(--sub); }
+  .msheet .mcheck-bar { display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+                        margin:4px 0 10px; font-size:.85rem; }
+  .msheet.check-on td .mark { cursor:pointer; position:relative; }
+  .msheet.check-on td .mark.ck::after { content:"✓"; position:absolute; inset:-4px;
+    display:flex; align-items:center; justify-content:center; color:#fff;
+    font-weight:800; font-size:.95rem; text-shadow:0 0 4px #000; }
 </style>
 </head>
 <body>
@@ -90,6 +96,6 @@
     <div id="manual-body"></div>
   </div>
 </div>
-<script src="app.js?v=1795451570"></script>
+<script src="app.js?v=1795452643"></script>
 </body>
 </html>
