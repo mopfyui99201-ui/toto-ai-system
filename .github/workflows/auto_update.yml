@@ -1,0 +1,46 @@
+name: toto 自動更新（結果確定→AI学習→最新情報→公開）
+
+# 毎日 09:00 / 18:00 / 22:00 JST に実行（cronはUTC指定）
+# Macの電源に関係なく GitHub サーバー上で完結する。
+on:
+  schedule:
+    - cron: "0 0 * * *"    # 09:00 JST
+    - cron: "0 9 * * *"    # 18:00 JST
+    - cron: "0 13 * * *"   # 22:00 JST
+  workflow_dispatch:        # 手動実行も可能
+
+jobs:
+  auto-update:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Tokyo
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 依存ライブラリをインストール
+        run: >-
+          pip install --quiet
+          requests beautifulsoup4 lxml numpy scipy lightgbm
+          python-dotenv ddgs
+
+      - name: 結果確定→AI自己学習→最新情報取得→data.json生成
+        run: python runner/ci_update.py --news
+
+      - name: 変更をコミットしてGitHub Pagesへ反映
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data.json build.json index.html maintenance.json \
+                  "runner/ユーザー用データ/toto_data.db" \
+                  "runner/ユーザー用データ/tuning.json" \
+                  "runner/ユーザー用データ/live_bundle.json"
+          if git diff --cached --quiet; then
+            echo "変更なしのためコミットをスキップ"
+          else
+            git commit -m "🤖 [auto] 結果確定・AI自己学習・最新開催回の自動更新 ($(date '+%m-%d %H:%M JST'))"
+            git push
+          fi

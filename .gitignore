@@ -1,0 +1,7 @@
+# シークレット・キャッシュ・OS生成物を誤コミットしない
+runner/ユーザー用データ/.env
+runner/ユーザー用データ/logs/
+runner/ユーザー用データ/pids/
+runner/システム内部/__pycache__/
+runner/**/__pycache__/
+.DS_Store
