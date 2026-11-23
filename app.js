@@ -53,6 +53,7 @@ const AUTO_KEY = "toto_auto_v1";
 const AUTO_INTERVAL = 30 * 60 * 1000;
 const RESULT_LIST_URL = "https://store.toto-dream.com/dcs/subos/screen/pi04/spin011/PGSPIN01101InitLotResultLsttoto.form";
 const RESULT_DETAIL_URL = "https://store.toto-dream.com/dcs/subos/screen/pi04/spin011/PGSPIN01101LnkHoldCntLotResultLsttoto.form";
+const INFO_URL = "https://store.toto-dream.com/dcs/subos/screen/pi01/spin000/PGSPIN00001DisptotoLotInfo.form";
 const NEWS_URLS = [
   "https://www.jleague.jp/news/",
   "https://www.toto-dream.com/toto/",
@@ -61,7 +62,8 @@ const AUTO_RE = /第\s*(\d+)\s*回/;
 const HOLD_RE = /holdCntId=(\d+)/;
 const SCORE_RE = /(\d+)\s*-\s*(\d+)/;
 
-let AUTO = { enabled: true, lastRun: 0, status: "未取得", results: {}, news: [] };
+let AUTO = { enabled: true, lastRun: 0, status: "未取得", results: {}, news: [],
+             official: null, newer: false };
 try {
   const raw = localStorage.getItem(AUTO_KEY);
   if (raw) AUTO = { ...AUTO, ...JSON.parse(raw) };
@@ -126,8 +128,28 @@ async function fetchNewsItems() {
   return items.slice(0, 8);
 }
 
+/* 公式「totoくじ情報」ページを取得し、最新の開催回番号・開催日を検出する。
+ * 公開データ（data.json）より新しい回が出ていれば AUTO.newer=true にして通知する。 */
+async function checkOfficialRound() {
+  try {
+    const html = await fetchExternal(INFO_URL);
+    const doc = _doc(html);
+    const text = _text(doc.body);
+    const rounds = [...text.matchAll(/第\s*(\d+)\s*回/g)].map((m) => +m[1]);
+    if (!rounds.length) return;
+    const dm = /(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日/.exec(text);
+    const held = dm ? `${dm[1]}-${String(+dm[2]).padStart(2, "0")}-${String(+dm[3]).padStart(2, "0")}` : "";
+    const latest = Math.max(...rounds);
+    AUTO.official = { round_no: `第${latest}回`, held_date: held, checked_at: Date.now() };
+    const cur = parseInt((AUTO_RE.exec(DATA ? DATA.round_no : "") || [])[1] || "0", 10);
+    AUTO.newer = latest > cur;
+    saveAuto();
+  } catch (e) { /* 公式ページ取得失敗は表示を変えず無視 */ }
+}
+
 async function autoCollect() {
   AUTO.status = "取得中…"; updateAutobar();
+  checkOfficialRound();
   try {
     const listHtml = await fetchExternal(RESULT_LIST_URL);
     const rounds = listCompletedRounds(listHtml);
@@ -194,6 +216,12 @@ function updateAutobar() {
   const last = AUTO.lastRun
     ? new Date(AUTO.lastRun).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })
     : "—";
+  const newerHtml = AUTO.newer && AUTO.official
+    ? `<div class="warn" style="flex-basis:100%;font-size:.8rem">
+         🔔 公式サイトに <b>${esc(AUTO.official.round_no)}</b>${AUTO.official.held_date ? `（${esc(AUTO.official.held_date)}）` : ""} の情報があります。
+         現在の公開データは <b>${esc(DATA ? DATA.round_no : "")}</b> です。
+         Mac側で「最新情報を取得」→「固定URLへ最新予想を反映・公開」を実行すると自動で切り替わります。</div>`
+    : "";
   el.innerHTML =
     `<button class="btn sub" id="auto-toggle" style="padding:6px 12px;font-size:.78rem">
        🤖 自動収集：${AUTO.enabled ? "ON" : "OFF"}</button>
@@ -202,7 +230,7 @@ function updateAutobar() {
     (AUTO.news && AUTO.news.length
       ? `<details><summary>📰 自動収集ニュース・怪我情報（${AUTO.news.length}件）</summary>` +
         AUTO.news.map((n) => `<p style="margin:4px 0;font-size:.78rem"><a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(n.title)}</a></p>`).join("") +
-        `</details>` : "");
+        `</details>` : "") + newerHtml;
   $("#auto-toggle").onclick = () => { AUTO.enabled = !AUTO.enabled; saveAuto(); updateAutobar(); };
   $("#auto-now").onclick = () => autoCollect();
 }
@@ -733,6 +761,29 @@ function drawHistory(g) {
     ${catRows ? `<h4>カテゴリ別得意度</h4><table>${catRows}</table>` : ""}`;
   el.innerHTML = html;
 
+  // 🧠 AI自己学習チューニング（Mac側の答え合わせ履歴から自動学習した補正係数）
+  const L = DATA.learning;
+  if (L && L.metrics && L.metrics.n) {
+    const m = L.metrics, c = L.coefficients || {};
+    const keyOf = { "1": "home", "0": "draw", "2": "away" };
+    const fmtPt = (v) => `${v >= 0 ? "+" : ""}${Math.round(v * 1000) / 10}pt`;
+    el.innerHTML += `<h4>🧠 AI自己学習チューニング（答え合わせ連動・自動更新）</h4>
+      <p class="muted">判定済 ${m.n}件・的中率 ${m.accuracy}%・波乱発生率 ${m.upset_rate}%・最終学習 ${esc(L.updated_at || "—")}</p>
+      <table><tr><th>結果</th><th>予測平均</th><th>実際頻度</th><th>バイアス</th><th>次回への補正</th></tr>` +
+      OUTCOMES.map((o) => `<tr><td>${OUTCOME_LABEL[o]}</td>
+        <td>${m.mean_pred ? m.mean_pred[o] : "-"}%</td><td>${m.actual_rate ? m.actual_rate[o] : "-"}%</td>
+        <td>${m.bias_pt ? m.bias_pt[o] : "-"}pt</td><td><b>${fmtPt(c[keyOf[o]] || 0)}</b></td></tr>`).join("") +
+      `</table><p class="muted">過去の的中／不的中履歴から引き分け・ホーム／アウェイの偏りを自動分析し、
+       Mac側の再予測へ補正係数として自動反映しています。</p>`;
+    const hist = (L.history || []).slice(-10);
+    if (hist.length > 1) {
+      el.innerHTML += `<div class="row" style="gap:4px;align-items:flex-end;height:64px;margin-top:6px">` +
+        hist.map((h) => `<div title="${esc(h.ts)} 的中率${h.accuracy}%（n=${h.n}）"
+             style="flex:1;background:var(--blue);height:${Math.max(4, (h.accuracy || 0) * 0.6)}px;border-radius:3px 3px 0 0"></div>`).join("") +
+        `</div><p class="muted">直近の的中率推移（バー）</p>`;
+    }
+  }
+
   document.querySelectorAll(".stake-save").forEach((b) => b.onclick = () => {
     const rk = b.dataset.rk;
     const inv = parseInt(document.querySelector(`.stake-inv[data-rk="${rk}"]`).value || "0", 10);
@@ -815,6 +866,9 @@ async function boot() {
     // 30分以上経過していれば裏側で自動収集（画面はブロックしない）
     if (AUTO.enabled && (!AUTO.lastRun || Date.now() - AUTO.lastRun > AUTO_INTERVAL)) {
       autoCollect();
+    } else {
+      // 自動収集OFF・間隔内でも、公式の最新回だけは軽量チェックして通知する
+      checkOfficialRound().then(updateAutobar);
     }
   } catch (e) {
     $("#app").innerHTML = card(`<h3>⚠️ データを読み込めませんでした</h3>
