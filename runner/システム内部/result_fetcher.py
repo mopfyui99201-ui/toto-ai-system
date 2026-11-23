@@ -45,6 +45,25 @@ def list_completed_rounds(html: str) -> list[dict]:
     return rounds
 
 
+def parse_payouts(html: str) -> dict:
+    """結果詳細HTMLから1〜3等の払戻金（100円あたり・円）を抽出する（best-effort）。"""
+    soup = BeautifulSoup(html, "lxml")
+    text = soup.get_text(" ", strip=True)
+    payouts: dict[str, int] = {}
+    for grade in ("1等", "2等", "3等"):
+        idx = text.find(grade)
+        if idx < 0:
+            continue
+        window = text[idx:idx + 160]
+        m = re.search(r"([0-9][0-9,]{2,})\s*円", window)
+        if m:
+            try:
+                payouts[grade[0]] = int(m.group(1).replace(",", ""))
+            except ValueError:
+                continue
+    return payouts
+
+
 def parse_result_html(html: str) -> dict:
     """結果詳細HTMLから各試合のスコアとくじ結果（1/0/2）を抽出する。"""
     soup = BeautifulSoup(html, "lxml")
@@ -68,7 +87,8 @@ def parse_result_html(html: str) -> dict:
                 "result": cells[6] if cells[6] in VALID_RESULTS else "",
             })
         break
-    return {"round_no": round_no, "matches": matches}
+    return {"round_no": round_no, "matches": matches,
+            "payouts": parse_payouts(html)}
 
 
 def fetch_latest_result() -> dict:
@@ -95,5 +115,6 @@ def fetch_latest_result() -> dict:
     filled = [m for m in matches if m["result"]]
     return {
         "ok": bool(matches), "error": "", "round_no": parsed["round_no"] or target["round_no"],
-        "matches": matches, "total": len(matches), "filled_count": len(filled), "sources": sources,
+        "matches": matches, "total": len(matches), "filled_count": len(filled),
+        "payouts": parsed.get("payouts") or {}, "sources": sources,
     }

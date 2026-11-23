@@ -443,6 +443,27 @@ function toast(msg) {
 function probCell(p, top) {
   return `<td>${p}%<div class="bar"><i style="width:${p}%"></i></div></td>`;
 }
+/* predictor.match_reason のJS移植：確率バー下の判断根拠コメント */
+function matchReason(a) {
+  const parts = [];
+  const lh = a.lam_h, la = a.lam_a;
+  if (lh && la) {
+    if (lh > la * 1.15) parts.push(`得点期待値はホーム有利（${lh}−${la}）`);
+    else if (la > lh * 1.15) parts.push(`得点期待値はアウェイ有利（${lh}−${la}）`);
+    else parts.push("得点期待値は拮抗");
+  }
+  const probs = { "1": a.p1 || 0, "0": a.p0 || 0, "2": a.p2 || 0 };
+  const top = a.predicted || OUTCOMES.reduce((x, y) => (probs[y] > probs[x] ? y : x));
+  const tp = probs[top] || 0;
+  if (tp >= 55) parts.push(`本命${OUTCOME_LABEL[top]}が${tp}%で優位`);
+  else if (tp < 40) parts.push("三つ巴の接戦");
+  if (a.upset) parts.push("波乱警戒：波乱狙い目");
+  if ((a.draw_risk || 0) >= 70) parts.push("引分危険度が高い");
+  if ((probs["0"] || 0) >= 30) parts.push(`引き分け確率${probs["0"]}%と高め`);
+  const note = (a.news_note || "").trim();
+  if (note && !note.includes("なし") && !note.includes("特筆")) parts.push("ニュース・天候補正あり");
+  return parts.slice(0, 4).join("／") || "統計モデルによる予測";
+}
 function card(html) { return `<div class="card">${html}</div>`; }
 
 /* ---------------- くじ種切替 ---------------- */
@@ -467,7 +488,7 @@ function renderWinDraw(g) {
 
   // 予想テーブル
   html += card(`<h3 style="margin-top:0">🎯 勝敗予想</h3><div style="overflow-x:auto"><table>
-    <tr><th>試合</th><th class="l">対戦カード</th><th>1 ホーム勝ち</th><th>0 引き分け</th><th>2 アウェイ勝ち</th><th>AI本命</th><th>接戦度</th><th>引分危険度</th><th>波乱</th></tr>` +
+    <tr><th>試合</th><th class="l">対戦カード</th><th>1 ホーム勝ち</th><th>0 引き分け</th><th>2 アウェイ勝ち</th><th>AI本命</th><th>接戦度</th><th>引分危険度</th><th>波乱</th><th class="l">AI根拠</th></tr>` +
     rows.map((a) => `<tr>
       <td>${a.match_no}</td>
       <td class="l">${esc(a.home)} vs ${esc(a.away)}<br><span class="muted">${esc(a.date)} ${esc(a.time)}</span></td>
@@ -475,7 +496,8 @@ function renderWinDraw(g) {
       <td><b>${OUTCOME_LABEL[a.predicted]}</b></td>
       <td>${(() => { const s = [a.p1, a.p0, a.p2].sort((x, y) => y - x); return `${Math.round((s[0] - s[1]) * 10) / 10}pt`; })()}</td>
       <td>${a.draw_risk ?? "-"}</td>
-      <td>${a.upset ? `<span class="warn">⚡波乱狙い</span>` : ""}</td></tr>`).join("") +
+      <td>${a.upset ? `<span class="warn">⚡波乱狙い</span>` : ""}</td>
+      <td class="l" style="font-size:.72rem;max-width:220px">${esc(a.reason || matchReason(a))}</td></tr>`).join("") +
     `</table></div>`);
 
   // 推しクラブへの冷静アドバイス
@@ -511,8 +533,8 @@ function renderWinDraw(g) {
   html += `<div class="card"><h3 style="margin-top:0">💴 買い目自動提案</h3>
     <div class="row">
       <label class="muted">予算(円)<br><input type="number" id="myai_budget" value="1000" step="100" min="100" style="width:110px"></label>
-      <label class="muted">狙い方<br><select id="myai_mode" style="width:150px">
-        <option value="steady">本命堅実</option><option value="upset">波乱狙い</option></select></label>
+      <label class="muted">狙い方<br><select id="myai_mode" style="width:190px">
+        <option value="auto">自動（キャリーオーバー連動）</option><option value="steady">本命堅実</option><option value="upset">波乱狙い</option></select></label>
       <button class="btn" id="btn-opt">🎯 買い目を最適化</button>
     </div><div id="plan-out"></div></div>`;
 
@@ -547,20 +569,28 @@ function renderWinDraw(g) {
   // 買い目最適化の配線
   $("#btn-opt").onclick = () => {
     const budget = parseInt($("#myai_budget").value || "1000", 10);
-    const mode = $("#myai_mode").value;
+    const selMode = $("#myai_mode").value;
+    const mode = selMode === "auto" ? (DATA.carryover ? "upset" : "steady") : selMode;
     const plan = optimizeGreedy(rows, budget, mode);
+    const aiMeta = `AI的中率 ${((DATA.learning || {}).metrics || {}).accuracy ?? "-"}%／回収率 ${(DATA.learning || {}).metrics?.recovery ?? "-"}%`;
     const marks = plan.marks.map((m) =>
       `<tr><td>${m.match_no}</td><td class="l">${esc(m.home)} vs ${esc(m.away)}</td>
        <td>${m.outcomes.map((o) => `<span class="mark m${o}">${o}</span>`).join(" ")}</td><td>${m.type}</td></tr>`).join("");
     $("#plan-out").innerHTML =
-      `<p><b>${plan.lines}口・${plan.cost.toLocaleString()}円・全的中期待度 ${plan.coverage}%</b></p>
+      `${DATA.carryover && selMode === "auto" ? `<p class="warn">🔥 キャリーオーバー ${esc(DATA.carryover)} を検出 → 期待値( EV )最大化のため「波乱狙い（引き分け・穴厚め）」を自動選択しました</p>` : ""}
+       <p><b>${plan.lines}口・${plan.cost.toLocaleString()}円・全的中期待度 ${plan.coverage}%</b></p>
        <div style="overflow-x:auto"><table><tr><th>試合</th><th class="l">対戦カード</th><th>買い目</th><th>種類</th></tr>${marks}</table></div>
        <div id="msheet"></div>
        <details style="margin-top:10px"><summary class="btn sub" style="display:inline-block;padding:8px 14px;border-radius:10px">📱 1試合ずつマーク確認モード</summary>
          <div id="markcheck" style="margin-top:10px"></div></details>
-       <p><button class="btn sub" id="btn-dl">⬇ マークシートを保存</button></p>`;
+       <p><button class="btn sub" id="btn-dl">⬇ マークシートを保存</button>
+          <button class="btn sub" id="btn-png">🖼 PNG画像で保存</button></p>`;
     $("#msheet").innerHTML = markSheetHTML(plan.marks, g.round_key || DATA.round_no);
     wireMarkCheck($("#plan-out"));
+    $("#btn-png").onclick = () => downloadPngCard("toto 勝敗予想マークシート",
+      `${g.label || g.round_key || DATA.round_no}／予算 ${budget.toLocaleString()}円／${aiMeta}`,
+      plan.marks.map((m) => ({ no: m.match_no, match: `${m.home} vs ${m.away}`,
+        picks: m.outcomes.map((o) => OUTCOME_LABEL[o]), extra: m.type })));
     $("#btn-dl").onclick = () => {
       const blob = new Blob([markSheetHTML(plan.marks, g.round_key || DATA.round_no)], { type: "text/html" });
       const a = document.createElement("a");
@@ -608,8 +638,8 @@ function renderGoal(g) {
   html += `<div class="card"><h3 style="margin-top:0">💴 買い目自動提案（予算・狙い方による得点フォーメーション最適化）</h3>
     <div class="row">
       <label class="muted">予算(円)<br><input type="number" id="goal_budget" value="1000" step="100" min="100" style="width:110px"></label>
-      <label class="muted">狙い方<br><select id="goal_mode" style="width:150px">
-        <option value="steady">本命堅実</option><option value="upset">波乱狙い</option></select></label>
+      <label class="muted">狙い方<br><select id="goal_mode" style="width:190px">
+        <option value="auto">自動（キャリーオーバー連動）</option><option value="steady">本命堅実</option><option value="upset">波乱狙い</option></select></label>
       <button class="btn" id="btn-goal-opt">🎯 得点買い目を最適化</button>
     </div><div id="goal-plan-out"></div></div>`;
 
@@ -620,7 +650,7 @@ function renderGoal(g) {
 
   $("#btn-goal-opt").onclick = () => {
     const budget = parseInt($("#goal_budget").value || "1000", 10);
-    const mode = $("#goal_mode").value;
+    $("#goal_mode").value; // 得点は投票率を使わないためモード差なし（auto/steady/upset 同等）
     const plan = optimizeGoalGreedy(rows, budget);
     const marksHtml = plan.marks.map((m) =>
       `<tr><td>${m.match_no}</td><td class="l">${esc(m.home)} vs ${esc(m.away)}</td>
@@ -631,9 +661,15 @@ function renderGoal(g) {
       `<p><b>${plan.lines}口・${plan.cost.toLocaleString()}円・全的中期待度 ${plan.coverage}%</b></p>
        <div style="overflow-x:auto"><table><tr><th>試合</th><th class="l">対戦カード</th><th>ホーム得点</th><th>アウェイ得点</th><th>種類</th></tr>${marksHtml}</table></div>
        <div id="goal-plan-sheet" style="margin-top:10px"></div>
-       <p><button class="btn sub" id="btn-goal-dl">⬇ 得点マークシートを保存</button></p>`;
+       <p><button class="btn sub" id="btn-goal-dl">⬇ 得点マークシートを保存</button>
+          <button class="btn sub" id="btn-goal-png">🖼 PNG画像で保存</button></p>`;
     const label = `${DATA.round_no} ${g.label || ""}（最適買い目）`;
     $("#goal-plan-sheet").innerHTML = goalSheetHTML(plan.marks, label);
+    $("#btn-goal-png").onclick = () => downloadPngCard("totoGOAL 得点予想マークシート",
+      `${label}／予算 ${budget.toLocaleString()}円／AI的中率 ${((DATA.learning || {}).goal || {}).metrics?.team_accuracy ?? "-"}%`,
+      plan.marks.map((m) => ({ no: m.match_no, match: `${m.home} vs ${m.away}`,
+        picks: [`H:${(m.home_picks || []).map((c) => GOAL_LABEL[c]).join("/")}`, `A:${(m.away_picks || []).map((c) => GOAL_LABEL[c]).join("/")}`].join(" "),
+        extra: `${m.home_type || ""}/${m.away_type || ""}` })));
     wireMarkCheck($("#goal-plan-out"));
     $("#btn-goal-dl").onclick = () => {
       const blob = new Blob([goalSheetHTML(plan.marks, label)], { type: "text/html" });
@@ -1016,6 +1052,21 @@ function drawHistory(g) {
       `<p class="muted">青=的中率／グレー=仮想回収率（投資1,000円・的中1試合=400円相当の試算）</p>`;
   }
 
+  // 💰 AI推奨買い目の通算収支トラッカー（公式配当連動・試算）
+  const TR = DATA.tracker;
+  if (TR && TR.rounds && TR.rounds.length) {
+    const tt = TR.totals || {};
+    el.innerHTML += `<h4>💰 AI推奨買い目の通算収支トラッカー（公式配当連動・試算）</h4>
+      <p class="muted">通算投資 <b>${(tt.investment || 0).toLocaleString()}円</b>／払戻 <b>${(tt.payout || 0).toLocaleString()}円</b>／
+      実回収率 <b>${tt.recovery ?? "—"}%</b>（${tt.rounds || 0}回分・各${(TR.budget || 1000).toLocaleString()}円買い続けた試算）</p>
+      <table><tr><th>開催回</th><th>投資</th><th>買い目</th><th>中を含む試合</th><th>期待的中</th><th>等級</th><th>払戻</th></tr>` +
+      TR.rounds.slice(-10).reverse().map((r) => `<tr><td>${esc(r.round_no)}</td>
+        <td>${r.cost.toLocaleString()}円</td><td>${r.lines}口</td>
+        <td>${r.covered}/${r.total}</td><td>${r.expected_hits}</td>
+        <td>${r.grade || "—"}</td><td>${r.has_payout ? r.payout.toLocaleString() + "円" : "配当未取得"}</td></tr>`).join("") +
+      `</table><p class="muted">各開催回のAI最適買い目を買い続けた場合の試算。配当金は公式1〜3等払戻を使用（未取得の回は0円計上）。</p>`;
+  }
+
   document.querySelectorAll(".stake-save").forEach((b) => b.onclick = () => {
     const rk = b.dataset.rk;
     const inv = parseInt(document.querySelector(`.stake-inv[data-rk="${rk}"]`).value || "0", 10);
@@ -1033,6 +1084,44 @@ function drawHistory(g) {
     else delete PROFILE.manual_results[rk][no];
     saveProfile(); drawHistory(g);
   });
+}
+
+/* ---------------- 予想マークシート PNG画像カード ---------------- */
+function downloadPngCard(title, meta, rows) {
+  const W = 1080, rh = 44, pad = 36, headH = 108;
+  const H = headH + rows.length * rh + 66;
+  const cv = document.createElement("canvas");
+  cv.width = W; cv.height = H;
+  const x = cv.getContext("2d");
+  x.fillStyle = "#f4f7fb"; x.fillRect(0, 0, W, H);
+  x.fillStyle = "#16324f"; x.fillRect(0, 0, W, headH - 8);
+  x.fillStyle = "#ffffff"; x.font = "bold 32px sans-serif";
+  x.fillText(title, pad, 46);
+  x.font = "18px sans-serif"; x.fillStyle = "#cfe0ff";
+  x.fillText(String(meta).slice(0, 64), pad, 78);
+  let y = headH;
+  x.fillStyle = "#2f6fed"; x.font = "bold 17px sans-serif";
+  x.fillText("試合", pad, y); x.fillText("対戦カード", 110, y); x.fillText("買い目", 730, y);
+  y += 10;
+  x.strokeStyle = "#d6dbe3"; x.lineWidth = 2;
+  x.beginPath(); x.moveTo(pad, y); x.lineTo(W - pad, y); x.stroke();
+  y += rh / 2 + 7;
+  x.font = "17px sans-serif"; x.fillStyle = "#16324f";
+  for (const r of rows) {
+    x.fillText(String(r.no), pad, y);
+    x.fillText(String(r.match).slice(0, 24), 110, y);
+    x.fillStyle = "#e5484d"; x.font = "bold 18px sans-serif";
+    x.fillText(String(r.picks).slice(0, 3).join("・").slice(0, 30), 730, y);
+    x.fillStyle = "#16324f"; x.font = "17px sans-serif";
+    y += rh;
+  }
+  x.fillStyle = "#6b7a8d"; x.font = "15px sans-serif";
+  x.fillText(`生成: ${new Date().toLocaleString("ja-JP")}／この画像はAI予想の記録用です`, pad, H - 24);
+  cv.toBlob((b) => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(b); a.download = "toto_mark_card.png"; a.click();
+    URL.revokeObjectURL(a.href);
+  }, "image/png");
 }
 
 /* ---------------- 使い方マニュアル ---------------- */

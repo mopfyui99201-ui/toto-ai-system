@@ -14,7 +14,9 @@ import time
 import database as db
 import engine
 import goal_predictor
+import predictor
 import self_tuner
+import tracker
 from config import GAME_TYPES, USER_DIR
 
 SITE_DIR = USER_DIR / "GitHub公開サイト"
@@ -29,6 +31,8 @@ def _win_draw_payload(round_key: str, matches: list[dict]) -> dict:
     rows = []
     for m in matches:
         p = preds.get(m["match_no"], {})
+        lam_h, lam_a = predictor.expected_goals(m)
+        reason_src = {**p, "lam_h": round(lam_h, 2), "lam_a": round(lam_a, 2)}
         rows.append({
             "match_no": m["match_no"], "home": m["home"], "away": m["away"],
             "date": m.get("date", ""), "time": m.get("time", ""), "stadium": m.get("stadium", ""),
@@ -37,6 +41,8 @@ def _win_draw_payload(round_key: str, matches: list[dict]) -> dict:
             "predicted": p.get("predicted"), "draw_risk": p.get("draw_risk"),
             "upset": bool(p.get("upset")), "upset_note": p.get("upset_note", ""),
             "news_note": p.get("news_note", ""),
+            "lam_h": round(lam_h, 2), "lam_a": round(lam_a, 2),
+            "reason": predictor.match_reason(reason_src),
         })
     return {"rows": rows, "results": {str(k): v for k, v in db.get_results(round_key).items()}}
 
@@ -58,6 +64,7 @@ def _goal_payload(game: dict) -> dict:
 
 def build_site_data() -> dict:
     """公開サイトが読み込む data.json の中身を組み立てる。"""
+    db.init_db()  # 既存DBへの新テーブル（payouts等）の後方互換マイグレーション
     bundle = engine.load_live_bundle()
     if not bundle:
         raise RuntimeError("ライブ取得データがありません。先に「🔄 最新情報を取得」を実行してください。")
@@ -84,6 +91,7 @@ def build_site_data() -> dict:
         "sales": bundle.get("sales") or {},
         "carryover": bundle.get("carryover", ""),
         "learning": self_tuner.summary(),
+        "tracker": tracker.summary(),
         "games": games,
     }
 

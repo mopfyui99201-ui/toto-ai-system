@@ -43,6 +43,11 @@ CREATE TABLE IF NOT EXISTS performance (
     investment INTEGER, payout INTEGER, recovery REAL,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS payouts (
+    round_no TEXT PRIMARY KEY,
+    grade1 INTEGER, grade2 INTEGER, grade3 INTEGER,
+    fetched_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -177,6 +182,33 @@ def all_labeled_samples() -> list[tuple[dict, str]]:
             " ON m.round_no=r.round_no AND m.match_no=r.match_no"
         ).fetchall()
     return [(json.loads(r["payload"]), r["actual"]) for r in rows]
+
+
+def save_payouts(round_no: str, payouts: dict) -> None:
+    """公式の1〜3等配当金（100円あたり）を保存する。"""
+    with _conn() as con:
+        con.execute(
+            "INSERT OR REPLACE INTO payouts(round_no, grade1, grade2, grade3)"
+            " VALUES(?,?,?,?)",
+            (round_no, payouts.get("1"), payouts.get("2"), payouts.get("3")),
+        )
+
+
+def get_payouts(round_no: str) -> dict | None:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT grade1, grade2, grade3 FROM payouts WHERE round_no=?", (round_no,)
+        ).fetchone()
+    if not row:
+        return None
+    return {"1": row["grade1"], "2": row["grade2"], "3": row["grade3"]}
+
+
+def list_payouts() -> dict[str, dict]:
+    with _conn() as con:
+        rows = con.execute("SELECT round_no, grade1, grade2, grade3 FROM payouts").fetchall()
+    return {r["round_no"]: {"1": r["grade1"], "2": r["grade2"], "3": r["grade3"]}
+            for r in rows}
 
 
 def has_any_match() -> bool:

@@ -186,6 +186,11 @@ def fetch_and_autofill_results(investment: int = 1000) -> dict:
         saved = {no: r for no, r in filled.items() if no in stored}
         if saved:
             data["performance"] = evaluate_round(target, saved, investment=investment)
+    # 公式の1〜3等配当金を取得できていれば保存（通算収支トラッカー用）
+    payouts = data.get("payouts") or {}
+    if target and payouts:
+        db.save_payouts(target, payouts)
+        data["payouts_saved"] = True
     data["filled_map"] = filled
     data["target_round"] = target
     data["auto_saved"] = saved

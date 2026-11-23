@@ -13,7 +13,7 @@ from math import exp, factorial
 import numpy as np
 
 import self_tuner
-from config import HOME_ADVANTAGE, LEAGUE_AVG_GOALS, MODEL_PATH, OUTCOMES
+from config import HOME_ADVANTAGE, LEAGUE_AVG_GOALS, MODEL_PATH, OUTCOME_LABEL, OUTCOMES
 
 LABEL_INDEX = {"1": 0, "0": 1, "2": 2}
 
@@ -215,6 +215,40 @@ def _apply_h2h(probs: dict[str, float], match: dict) -> dict[str, float]:
     out["1"] *= 1 + bias
     out["2"] *= 1 - bias
     return out
+
+
+def match_reason(a: dict) -> str:
+    """予測根拠を簡潔な日本語1〜2行で生成する（UI表示用）。
+
+    a は predict_match/analyze の戻り値（lam_h/lam_a/p1/p0/p2/predicted/
+    draw_risk/upset/upset_note/news_note を参照）。
+    """
+    parts: list[str] = []
+    lh, la = a.get("lam_h"), a.get("lam_a")
+    if lh and la:
+        if lh > la * 1.15:
+            parts.append(f"得点期待値はホーム有利（{lh}−{la}）")
+        elif la > lh * 1.15:
+            parts.append(f"得点期待値はアウェイ有利（{lh}−{la}）")
+        else:
+            parts.append("得点期待値は拮抗")
+    probs = {"1": a.get("p1", 0), "0": a.get("p0", 0), "2": a.get("p2", 0)}
+    top_o = a.get("predicted") or max(OUTCOMES, key=lambda o: probs[o])
+    top_p = probs.get(top_o, 0)
+    if top_p >= 55:
+        parts.append(f"本命{OUTCOME_LABEL[top_o]}が{top_p}%で優位")
+    elif top_p < 40:
+        parts.append("三つ巴の接戦")
+    if a.get("upset"):
+        parts.append("波乱警戒：波乱狙い目")
+    if (a.get("draw_risk") or 0) >= 70:
+        parts.append("引分危険度が高い")
+    if probs.get("0", 0) >= 30:
+        parts.append(f"引き分け確率{probs['0']}%と高め")
+    note = (a.get("news_note") or "").strip()
+    if note and "なし" not in note and "特筆" not in note:
+        parts.append("ニュース・天候補正あり")
+    return "／".join(parts[:4]) if parts else "統計モデルによる予測"
 
 
 def predict_round(matches: list[dict], news_map: dict[int, dict] | None = None) -> list[dict]:
