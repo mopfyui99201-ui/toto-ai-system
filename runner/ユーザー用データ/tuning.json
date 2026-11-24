@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-11-24 01:10:09",
+  "updated_at": "2026-11-24 09:50:18",
   "min_samples": 8,
   "coefficients": {
     "draw": 0.0588,
@@ -28,6 +28,55 @@
     "upset_rate": 61.1,
     "team_bias": []
   },
+  "goal": {
+    "coefficients": {
+      "home": {
+        "0": 1.0,
+        "1": 1.0,
+        "2": 1.0,
+        "3+": 1.0
+      },
+      "away": {
+        "0": 1.0,
+        "1": 1.0,
+        "2": 1.0,
+        "3+": 1.0
+      }
+    },
+    "metrics": {
+      "n": 0,
+      "matches": 0
+    }
+  },
+  "weights": {
+    "ready": false,
+    "n": 18,
+    "features": [
+      "form_diff",
+      "power_diff",
+      "home_adv",
+      "news_shift",
+      "draw_rate"
+    ]
+  },
+  "growth": [
+    {
+      "round_no": "第1673回",
+      "held_date": "2026-11-21",
+      "hits": 3,
+      "total": 13,
+      "accuracy": 23.1,
+      "recovery": 120.0
+    },
+    {
+      "round_no": "第1673回｜mini toto",
+      "held_date": "2026-11-21",
+      "hits": 2,
+      "total": 5,
+      "accuracy": 40.0,
+      "recovery": 80.0
+    }
+  ],
   "history": [
     {
       "ts": "2026-11-24 00:50",
@@ -133,6 +182,40 @@
         "home": -0.027,
         "away": -0.0315
       }
+    },
+    {
+      "ts": "2026-11-24 09:50",
+      "n": 18,
+      "accuracy": 27.8,
+      "bias_pt": {
+        "1": -10.3,
+        "0": 22.4,
+        "2": -12.0
+      },
+      "coeffs": {
+        "draw": 0.0588,
+        "home": -0.027,
+        "away": -0.0315
+      },
+      "goal_n": 0,
+      "goal_accuracy": null
+    },
+    {
+      "ts": "2026-11-24 09:50",
+      "n": 18,
+      "accuracy": 27.8,
+      "bias_pt": {
+        "1": -10.3,
+        "0": 22.4,
+        "2": -12.0
+      },
+      "coeffs": {
+        "draw": 0.0588,
+        "home": -0.027,
+        "away": -0.0315
+      },
+      "goal_n": 0,
+      "goal_accuracy": null
     }
   ]
 }
