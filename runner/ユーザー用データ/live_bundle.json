@@ -1,8 +1,8 @@
 {
   "round_no": "第1676回",
-  "held_date": "2026-11-28",
+  "held_date": "2026-12-05",
   "round_status": "open",
-  "fetched_at": "2026-11-28 12:53:20",
+  "fetched_at": "2026-11-28 18:15:38",
   "sources": [
     {
       "label": "スポーツくじ公式 totoくじ情報（対戦カード・販売実績）",
@@ -178,15 +178,15 @@
     }
   ],
   "sales": {
-    "売上金額": "75,580,800円",
-    "投票口数": "755,808口",
-    "投票枚数": "95,779枚"
+    "売上金額": "843,700円",
+    "投票口数": "8,437口",
+    "投票枚数": "1,863枚"
   },
   "carryover": "",
   "games": {
     "toto": {
       "round_no": "第1676回",
-      "held_date": "2026-11-28",
+      "held_date": "2026-12-05",
       "source": "live",
       "game_type": "toto",
       "matches": [
@@ -720,7 +720,7 @@
     },
     "mini toto A組": {
       "round_no": "第1676回",
-      "held_date": "2026-11-28",
+      "held_date": "2026-12-05",
       "source": "live",
       "game_type": "mini toto A組",
       "matches": [
@@ -1038,7 +1038,7 @@
     },
     "mini toto B組": {
       "round_no": "第1676回",
-      "held_date": "2026-11-28",
+      "held_date": "2026-12-05",
       "source": "live",
       "game_type": "mini toto B組",
       "matches": [
@@ -1356,7 +1356,7 @@
     },
     "totoGOAL3": {
       "round_no": "第1676回",
-      "held_date": "2026-11-28",
+      "held_date": "2026-12-05",
       "source": "live",
       "game_type": "totoGOAL3",
       "matches": [
@@ -1620,7 +1620,7 @@
     },
     "totoGOAL2": {
       "round_no": "第1676回",
-      "held_date": "2026-11-28",
+      "held_date": "2026-12-05",
       "source": "live",
       "game_type": "totoGOAL2",
       "matches": [
